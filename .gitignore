@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+spikes/out/
+*.wav
+.pytest_cache/

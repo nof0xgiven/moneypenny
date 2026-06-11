@@ -1,0 +1,28 @@
+[project]
+name = "moneypenny"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "mlx-lm",
+    "mlx-audio",
+    "parakeet-mlx",
+    "sounddevice==0.5",
+    "numpy",
+    "scipy",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+markers = ["slow: loads a model or hits a live local service"]
+addopts = "-m 'not slow'"
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["moneypenny", "moneypenny.tools", "moneypenny.homey"]
