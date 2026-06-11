@@ -16,6 +16,15 @@ classification never stalls the frame loop. asyncio coordinates via
 run_in_executor. Worker exceptions are surfaced via done-callbacks - never
 silently swallowed (invariant #2).
 
+Thread affinity (hard requirement): MLX streams are thread-bound — each
+thread has its own stream registry, and evaluating a graph whose ops were
+scheduled on another thread's stream raises "There is no Stream(gpu, N) in
+current thread." (then SIGBUS). So every MLX component is CONSTRUCTED on the
+thread that will run it: VoiceEngine on the engine worker, Router on the
+route worker (which also rebinds mlx_lm's import-time generation_stream — see
+router.py), and the ASR transcriber on the event-loop thread where add_frame
+runs. The pools therefore exist before the models load.
+
 Known accepted limitation: if the user resumes speaking after maybe_end and
 changes the meaning, an already-executed read-only tool (weather) is harmless;
 Homey/timer commands need the full command present in the partial to classify
@@ -97,12 +106,20 @@ async def main() -> None:
     cfg = Config.from_env()
     loop = asyncio.get_running_loop()
 
+    # Pools first: MLX models must be constructed on the worker thread that
+    # will run them (streams are thread-bound; see module docstring).
+    engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
+    route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
+
     log.info("loading models (engine, router, asr)...")
-    engine = VoiceEngine(system_prompt=FRONT_OF_HOUSE, voice=cfg.voice,
-                         quantize_bits=cfg.quantize_bits,
-                         briefing_voice=cfg.briefing_voice)
-    router = Router(model_id=cfg.router_model)
-    asr = StreamingTranscriber(model_id=cfg.asr_model)
+    engine = await loop.run_in_executor(
+        engine_pool,
+        lambda: VoiceEngine(system_prompt=FRONT_OF_HOUSE, voice=cfg.voice,
+                            quantize_bits=cfg.quantize_bits,
+                            briefing_voice=cfg.briefing_voice),
+    )
+    router = await loop.run_in_executor(route_pool, lambda: Router(model_id=cfg.router_model))
+    asr = StreamingTranscriber(model_id=cfg.asr_model)  # loop thread: add_frame runs here
     vad = EnergyVAD()
     injections = InjectionQueue()
     timers = TimerService(
@@ -125,8 +142,6 @@ async def main() -> None:
     host = ToolHost(cfg, homey, timers, homey_status=homey_status)
     log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
 
-    engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
-    route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
     utt = UtteranceState()
 
     def classify_and_execute(transcript: str, t_marked: float, gen: int) -> None:

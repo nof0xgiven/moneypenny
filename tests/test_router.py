@@ -2,6 +2,8 @@
 
 Escalation-bias contract: Tier 1 assertions are exact; ambiguous cases assert
 NOT-tier-1 (they may be 0 or 2 - escalating is always acceptable)."""
+import concurrent.futures
+
 import pytest
 
 from moneypenny.router import Router, RouteDecision, parse_decision
@@ -106,3 +108,24 @@ def test_parse_nan_confidence_escalates():
     # unguarded comparison would keep tier 1 with NaN confidence.
     d = parse_decision('{"tier": 1, "tool": "weather", "args": {}, "confidence": NaN}')
     assert d.tier == 2 and d.confidence == 0.0
+
+
+@pytest.mark.slow
+def test_classify_works_on_a_worker_thread():
+    """app.py runs classify() on the route worker, but mlx_lm is imported on
+    the main thread — and mlx_lm.generate binds its module-level
+    generation_stream to the importing thread at import time. MLX streams are
+    thread-bound, so without Router rebinding that stream to the classifying
+    thread, the FIRST live classification dies with
+    "There is no Stream(gpu, N) in current thread."
+
+    classify() rebinds that stream global to the calling thread on every
+    thread change, so serial calls from different threads (this test + the
+    module-scoped main-thread fixture) are all valid in either order.
+    """
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="route"
+    ) as pool:
+        worker_router = pool.submit(Router).result()
+        d = pool.submit(worker_router.classify, "what's the weather like today").result()
+    assert d.tier == 1 and d.tool == "weather"

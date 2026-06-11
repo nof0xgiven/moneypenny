@@ -9,12 +9,20 @@ its generic capability path - free text alone cannot drive it.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import re
+import threading
 from dataclasses import dataclass
 
+import mlx.core as mx
 from mlx_lm import generate, load
+
+# `import mlx_lm.generate as ...` would bind the generate FUNCTION (mlx_lm's
+# __init__ re-exports it, shadowing the submodule attribute); we need the
+# module itself to rebind its generation_stream global.
+_mlx_lm_generate = importlib.import_module("mlx_lm.generate")
 
 TOOLS = ("weather", "homey", "timer")
 CONFIDENCE_FLOOR = 0.7
@@ -57,6 +65,27 @@ _FEWSHOT = [
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# MLX streams are thread-bound (per-thread stream registries), and
+# mlx_lm.generate creates its module-level generation_stream at IMPORT time —
+# i.e. on whatever thread first imports mlx_lm (the main thread, since this
+# module imports it at top). generate() wraps all its work in
+# `with mx.stream(generation_stream)`, so calling classify() from any other
+# thread (the app's route worker) dies with
+# "There is no Stream(gpu, N) in current thread." unless the global is
+# rebound to a stream created on the calling thread. There is no public knob
+# for this in mlx_lm; rebinding the module global is the supported-by-shape
+# escape hatch. Serialized callers only: concurrent classify() from multiple
+# threads was never supported (the app uses a single route worker).
+_stream_owner: int | None = None
+
+
+def _ensure_generation_stream_on_this_thread() -> None:
+    global _stream_owner
+    me = threading.get_ident()
+    if _stream_owner != me:
+        _mlx_lm_generate.generation_stream = mx.new_stream(mx.default_device())
+        _stream_owner = me
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -95,6 +124,7 @@ class Router:
         self._model, self._tokenizer = load(model_id)
 
     def classify(self, transcript: str) -> RouteDecision:
+        _ensure_generation_stream_on_this_thread()
         messages = [{"role": "system", "content": _SYSTEM}]
         for u, a in _FEWSHOT:
             messages.append({"role": "user", "content": u})

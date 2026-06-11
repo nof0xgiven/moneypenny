@@ -6,7 +6,10 @@ audio briefings (TTS, distinct voice) on the user channel, gated on output silen
 G2 invariant: this class returns model PCM; it never plays audio itself.
 
 Single-threaded by design: the app serializes all step()/inject() calls onto
-one worker; nothing here is locked.
+one worker; nothing here is locked. Construct and step on the SAME thread —
+MLX streams are thread-bound, so a VoiceEngine built on one thread cannot be
+stepped on another (RuntimeError "There is no Stream(gpu, N) in current
+thread.", then SIGBUS). The app constructs this on the engine worker.
 """
 from __future__ import annotations
 
