@@ -9,6 +9,9 @@ from scipy.signal import resample_poly
 
 
 def resample_24k_to_16k(pcm: np.ndarray) -> np.ndarray:
+    # Stateless per-frame resampling: no filter state is carried across frames,
+    # so there are minor edge artifacts at frame boundaries. Acceptable per spec;
+    # revisit with a stateful resampler only if real-mic ASR quality degrades.
     return resample_poly(pcm.astype(np.float32), up=2, down=3).astype(np.float32)
 
 
@@ -24,6 +27,7 @@ class StreamingTranscriber:
         return self._ctx.result.text
 
     def finish(self) -> str:
+        """Return the final transcript and invalidate the transcriber until reset()."""
         text = self._ctx.result.text
         self._ctx.__exit__(None, None, None)
         return text
