@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
 
+[project.scripts]
+moneypenny = "moneypenny.app:run"
+
 [tool.pytest.ini_options]
 markers = ["slow: loads a model or hits a live local service"]
 addopts = "-m 'not slow'"
