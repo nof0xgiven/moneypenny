@@ -60,6 +60,9 @@ class HomeyAdapter:
         if plan.requires_confirmation:
             # High-impact / broad ops are not Tier-1 material; Phase 2 escalates these.
             return HomeyResult(False, f"NEEDS CONFIRMATION NOT DONE: {plan.message.upper()}")
+        if plan.status_reads and not plan.operations:
+            # Status queries resolve to reads, not writes; Phase 2 territory.
+            return HomeyResult(False, "STATUS QUERY NOT SUPPORTED YET")
         if not plan.operations:
             reason = "; ".join(plan.failures) or plan.message or "no matching device"
             return HomeyResult(False, f"HOMEY FAILED {reason.upper()}")

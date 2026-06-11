@@ -4,6 +4,7 @@ import pytest
 
 from moneypenny.homey.aliases import HomeyAliases
 from moneypenny.homey.catalog import CapabilityRecord, DeviceRecord, HomeyCatalog
+from moneypenny.homey.client import HomeyClientError
 from moneypenny.homey.resolver import HomeyResolver
 from moneypenny.tools.homey_adapter import HomeyAdapter, HomeyResult
 
@@ -17,6 +18,13 @@ class FakeClient:
     def set_capability_value(self, device_id, capability_id, value):
         self.calls.append((device_id, capability_id, value))
         return {"value": value}
+
+
+class ExplodingClient(FakeClient):
+    """Fake whose writes always fail at the HTTP boundary."""
+
+    def set_capability_value(self, device_id, capability_id, value):
+        raise HomeyClientError("boom")
 
 
 def _cap(cid, ctype, value=None, **kw):
@@ -74,4 +82,30 @@ def test_unsupported_action_fails_cleanly(adapter):
     a, client = adapter
     result = a.execute(action="defenestrate", device="desk lamp")
     assert not result.ok
+    assert client.calls == []
+
+
+def test_broad_zone_plan_requires_confirmation_and_is_refused(adapter):
+    # "all" + zone is a broad target: the resolver marks the plan
+    # requires_confirmation, which Tier 1 refuses without touching the client.
+    a, client = adapter
+    result = a.execute(action="turn_on", device="all", zone="office")
+    assert not result.ok
+    assert "NEEDS CONFIRMATION" in result.summary
+    assert client.calls == []
+
+
+def test_client_error_yields_failure_result_not_exception():
+    client = ExplodingClient()
+    a = HomeyAdapter(client, _resolver())
+    result = a.execute(action="turn_on", device="desk lamp")
+    assert not result.ok
+    assert "DESK LAMP" in result.summary.upper()
+
+
+def test_status_query_is_refused_as_unsupported(adapter):
+    a, client = adapter
+    result = a.execute(action="status", device="desk lamp")
+    assert not result.ok
+    assert "STATUS QUERY NOT SUPPORTED" in result.summary
     assert client.calls == []
