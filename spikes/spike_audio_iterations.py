@@ -109,6 +109,13 @@ VARIANTS = {
     "c4_combo": lambda: run_variant(
         "c4_combo", SHARP_SYSTEM_PROMPT, make_male_briefing(), beat_seconds=6.0
     ),
+    # c4 RESULT: zero uptake + hallucinated facts + mentions briefings aloud.
+    # The sharp prompt was the harmful ingredient (c3 also hallucinated), so
+    # the actually evidence-driven combo is the two ingredients that each
+    # produced uptake on their own: original prompt + male voice + 6s beat.
+    "c5_voice_beat": lambda: run_variant(
+        "c5_voice_beat", SPIKE_SYSTEM_PROMPT, make_male_briefing(), beat_seconds=6.0
+    ),
 }
 
 
