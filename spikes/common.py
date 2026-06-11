@@ -99,6 +99,9 @@ class SpikeSession:
 
     def save(self, wav_name: str, text_name: str) -> None:
         """Writes into spikes/out/ regardless of cwd."""
+        if not self.out_pcm:
+            raise RuntimeError("no output PCM collected — did the session step any frames?")
+        OUT.mkdir(parents=True, exist_ok=True)
         pcm = np.concatenate(self.out_pcm, axis=-1)
         wav_path, text_path = OUT / wav_name, OUT / text_name
         rustymimi.write_wav(str(wav_path), pcm[0, 0], sample_rate=SAMPLE_RATE)
