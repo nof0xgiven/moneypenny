@@ -58,6 +58,8 @@ import logging
 import queue
 import time
 
+import numpy as np
+import sounddevice as sd
 from dotenv import load_dotenv
 
 from moneypenny.asr import StreamingTranscriber
@@ -74,6 +76,18 @@ from moneypenny.tools.timers import TimerService
 from moneypenny.vad import EnergyVAD
 
 log = logging.getLogger("moneypenny")
+
+STATUS_EVERY_FRAMES = 25  # ~2s of audio at 12.5 fps
+
+
+def _describe_device(kind: str) -> str:
+    """One-line summary of the default device for kind ('input'/'output')."""
+    try:
+        d = sd.query_devices(kind=kind)
+        return (f"{d['name']!r} max_{kind}_ch={d[f'max_{kind}_channels']} "
+                f"default_sr={d['default_samplerate']:.0f}")
+    except Exception as exc:  # diagnostics must never kill startup
+        return f"<query failed: {exc!r}>"
 
 
 class UtteranceState:
@@ -173,6 +187,16 @@ async def main() -> None:
             lambda f: f.exception() and log.error("route worker error: %r", f.exception())
         )
 
+    log.info("audio defaults: device=%s input=%s output=%s",
+             sd.default.device, _describe_device("input"), _describe_device("output"))
+
+    # diagnostics window (reset each status report)
+    win_frames = 0
+    win_start = time.perf_counter()
+    win_max_rms = 0.0
+    win_asr_s = 0.0
+    win_step_s = 0.0
+
     with AudioIO() as audio:
         log.info("session live - speak")
         while True:
@@ -182,10 +206,16 @@ async def main() -> None:
                 await asyncio.sleep(0.002)
                 continue
 
+            win_max_rms = max(win_max_rms, float(np.sqrt(np.mean(mic ** 2))))
+
             # parallel transcript tap (P0.1)
+            t0 = time.perf_counter()
             partial = asr.add_frame(mic)
+            win_asr_s += time.perf_counter() - t0
             event = vad.feed(mic)
 
+            if event:
+                log.info("vad %s partial=%r", event, partial)
             if event == "speech_start":
                 utt.reset()
             elif event == "maybe_end" and partial.strip():
@@ -208,11 +238,30 @@ async def main() -> None:
                 )
 
             # one model step, off the event loop thread
+            t0 = time.perf_counter()
             audio_out, text = await loop.run_in_executor(engine_pool, engine.step, mic)
+            win_step_s += time.perf_counter() - t0
             if audio_out is not None:
                 audio.speaker_frames.put_nowait(audio_out)
             if text:
                 print(text, end="", flush=True)
+
+            win_frames += 1
+            if win_frames >= STATUS_EVERY_FRAMES:
+                elapsed = time.perf_counter() - win_start
+                log.info(
+                    "status: micq=%d spkq=%d micRMS=%.6f vad=%s asr_len=%d "
+                    "fps=%.1f asr_ms=%.0f step_ms=%.0f",
+                    audio.mic_frames.qsize(), audio.speaker_frames.qsize(),
+                    win_max_rms, vad.in_speech, len(partial),
+                    win_frames / elapsed if elapsed > 0 else 0.0,
+                    win_asr_s / win_frames * 1000, win_step_s / win_frames * 1000,
+                )
+                win_frames = 0
+                win_start = time.perf_counter()
+                win_max_rms = 0.0
+                win_asr_s = 0.0
+                win_step_s = 0.0
 
 
 def run() -> None:

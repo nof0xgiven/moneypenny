@@ -26,6 +26,11 @@ class EnergyVAD:
         self._in_speech = False
         self._silent_run = 0
 
+    @property
+    def in_speech(self) -> bool:
+        """Read-only view for diagnostics/status reporting."""
+        return self._in_speech
+
     def feed(self, frame: np.ndarray) -> str | None:
         """Returns 'speech_start', 'maybe_end', 'utterance_end', or None."""
         is_loud = float(np.sqrt(np.mean(frame**2))) >= self._threshold
