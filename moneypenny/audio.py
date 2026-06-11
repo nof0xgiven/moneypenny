@@ -37,5 +37,15 @@ class AudioIO:
         return self
 
     def __exit__(self, *exc) -> None:
-        self._in.stop()
-        self._out.stop()
+        # stop-then-close per stream; nested finally so a raise anywhere can
+        # never skip closing the other PortAudio stream.
+        try:
+            try:
+                self._in.stop()
+            finally:
+                self._in.close()
+        finally:
+            try:
+                self._out.stop()
+            finally:
+                self._out.close()

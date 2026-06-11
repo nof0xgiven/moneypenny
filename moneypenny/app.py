@@ -61,19 +61,22 @@ class UtteranceState:
 
     gen is a generation counter bumped on every reset(): route jobs capture it
     at submit time, and the execution claim requires it to still match, so a
-    job queued for utterance N can never execute after utterance N+1 has begun
-    (reset() clearing `executed` would otherwise re-open the claim to a stale
-    queued job). Plain ints + GIL make the compare safe across threads."""
+    job queued for utterance N can never execute after utterance N+1 has begun.
+    The claim itself is executed_gen (the generation that executed a tool, -1
+    for none) rather than a boolean: a stale worker that claims late can only
+    write its own old gen value, which no current-generation check ever
+    matches — so it can neither double-execute nor suppress the next
+    utterance's execution. Single int reads/writes are atomic under the GIL;
+    no lock needed."""
 
     def __init__(self) -> None:
         self.gen = 0
         self.classified_text: str | None = None
-        self.executed = False
+        self.executed_gen = -1
 
     def reset(self) -> None:
         self.gen += 1
         self.classified_text = None
-        self.executed = False
 
 
 async def main() -> None:
@@ -105,8 +108,8 @@ async def main() -> None:
         try:
             decision = router.classify(transcript)
             log.info("route %r -> %s", transcript, decision)
-            if decision.tier == 1 and gen == utt.gen and not utt.executed:
-                utt.executed = True  # claim before executing: never run a tool twice
+            if decision.tier == 1 and gen == utt.gen and utt.executed_gen != gen:
+                utt.executed_gen = gen  # claim before executing: never run a tool twice
                 try:
                     briefing = host.execute(decision)  # action > narration
                 except Exception:
@@ -151,7 +154,7 @@ async def main() -> None:
                 final = asr.finish()
                 asr.reset()
                 grew = final.strip() and final.strip() != (utt.classified_text or "").strip()
-                if grew and not utt.executed:
+                if grew and utt.executed_gen != utt.gen:
                     submit_classification(final, time.perf_counter())
 
             # drain injections into the engine (inject runs on the engine worker;
