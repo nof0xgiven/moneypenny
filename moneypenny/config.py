@@ -16,7 +16,7 @@ class Config:
     homey_api_key: str
     weather_lat: float
     weather_lon: float
-    router_model: str = "mlx-community/Qwen3-4B-4bit"
+    router_model: str = "mlx-community/Qwen3-0.6B-4bit"
     asr_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
     voice: str = "NATF2"
     quantize_bits: int = 8
