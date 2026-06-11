@@ -1,0 +1,56 @@
+{
+  "zones": {
+    "living room": ["living room"],
+    "lounge": ["living room"],
+    "bedroom": ["master bedroom"],
+    "master bedroom": ["master bedroom"],
+    "hallway": ["hallway"],
+    "boys": ["hallway"]
+  },
+  "groups": [
+    {
+      "name": "living room lights",
+      "aliases": ["lights in the living room", "the living room lights"],
+      "zone": "Living Room",
+      "devices": ["Arches", "Ceiling"],
+      "capability": "onoff"
+    }
+  ],
+  "categories": {
+    "lights": {
+      "classes": ["light", "socket"],
+      "capabilities": ["onoff"],
+      "labels": ["lights", "lamps"]
+    },
+    "fans": {
+      "classes": ["fan"],
+      "capabilities": ["onoff"],
+      "labels": ["fan", "fans"]
+    },
+    "cameras": {
+      "classes": ["camera"],
+      "capabilities": [],
+      "labels": ["camera", "cameras"]
+    },
+    "thermostats": {
+      "classes": ["thermostat"],
+      "capabilities": [],
+      "labels": ["thermostat", "thermostats", "heating", "heat", "climate"]
+    },
+    "curtains": {
+      "classes": ["windowcoverings"],
+      "capabilities": [],
+      "labels": ["curtains", "curtain", "blinds", "blind", "covers", "shades", "window coverings"]
+    },
+    "tvs": {
+      "classes": ["tv"],
+      "capabilities": [],
+      "labels": ["tv", "tvs", "television", "telly"]
+    },
+    "sockets": {
+      "classes": ["socket"],
+      "capabilities": [],
+      "labels": ["socket", "sockets", "plug", "plugs", "outlet", "outlets"]
+    }
+  }
+}
