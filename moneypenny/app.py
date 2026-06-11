@@ -20,6 +20,14 @@ Known accepted limitation: if the user resumes speaking after maybe_end and
 changes the meaning, an already-executed read-only tool (weather) is harmless;
 Homey/timer commands need the full command present in the partial to classify
 Tier 1 at all, and escalation bias pushes truncated partials to Tier 2.
+
+Known Phase 1 limitation - speaker-queue latency ratchet: each inject() TTS
+stall blocks the engine worker, then the frame loop catches up by stepping
+through the backlog faster than realtime, bursting the produced PCM into the
+unbounded speaker_frames queue. After catch-up, production and consumption
+both run at 12.5 fps again, so the queue depth gained during the stall never
+drains: every stall permanently adds its duration to mouth-to-ear latency for
+the rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
 """
 from __future__ import annotations
 
@@ -49,13 +57,21 @@ log = logging.getLogger("moneypenny")
 
 class UtteranceState:
     """Tracks one utterance across the soft/hard VAD boundaries so a Tier 1
-    tool never executes twice for the same utterance."""
+    tool never executes twice for the same utterance.
+
+    gen is a generation counter bumped on every reset(): route jobs capture it
+    at submit time, and the execution claim requires it to still match, so a
+    job queued for utterance N can never execute after utterance N+1 has begun
+    (reset() clearing `executed` would otherwise re-open the claim to a stale
+    queued job). Plain ints + GIL make the compare safe across threads."""
 
     def __init__(self) -> None:
+        self.gen = 0
         self.classified_text: str | None = None
         self.executed = False
 
     def reset(self) -> None:
+        self.gen += 1
         self.classified_text = None
         self.executed = False
 
@@ -84,12 +100,12 @@ async def main() -> None:
     route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
     utt = UtteranceState()
 
-    def classify_and_execute(transcript: str, t_marked: float) -> None:
+    def classify_and_execute(transcript: str, t_marked: float, gen: int) -> None:
         """Runs on route_pool. Failures become log lines + (where sensible) briefings."""
         try:
             decision = router.classify(transcript)
             log.info("route %r -> %s", transcript, decision)
-            if decision.tier == 1 and not utt.executed:
+            if decision.tier == 1 and gen == utt.gen and not utt.executed:
                 utt.executed = True  # claim before executing: never run a tool twice
                 try:
                     briefing = host.execute(decision)  # action > narration
@@ -108,7 +124,7 @@ async def main() -> None:
 
     def submit_classification(transcript: str, t_marked: float) -> None:
         utt.classified_text = transcript
-        fut = route_pool.submit(classify_and_execute, transcript, t_marked)
+        fut = route_pool.submit(classify_and_execute, transcript, t_marked, utt.gen)
         fut.add_done_callback(
             lambda f: f.exception() and log.error("route worker error: %r", f.exception())
         )
