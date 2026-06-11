@@ -1,15 +1,11 @@
 """Engine thread affinity: MLX streams are thread-bound (per-thread stream
-registries since mlx 0.31), so a VoiceEngine constructed on one thread cannot
-be stepped on another — evaluation dies with
-"RuntimeError: There is no Stream(gpu, N) in current thread." followed by a
-bus error. That is exactly what the first live run hit: app.py built the
-engine on the event-loop thread and ran step() on the engine worker.
+registries since mlx 0.31), so a VoiceEngine must be constructed and used on
+the SAME thread. This test pins the supported pattern — construct + step +
+inject all on one engine worker, mirroring app.py — without audio devices.
 
-This test replicates the app's threading pattern WITHOUT audio devices and
-asserts the FIXED contract: construct the engine ON the single engine worker
-and run every step()/inject() on that same worker. (The broken
-construct-on-main pattern was reproduced once during diagnosis and is not
-kept as a test — it crashes the process with SIGBUS after the RuntimeError.)
+No negative test exists on purpose: constructing on one thread and stepping
+on another raises RuntimeError ("There is no Stream(gpu, N) in current
+thread.") and can SIGBUS the whole process.
 """
 import concurrent.futures
 
@@ -37,8 +33,8 @@ def test_engine_constructed_and_stepped_on_same_worker_thread():
                     out_frames.append(audio_out)
 
         # ~2s of frame loop, then a briefing injection (TTS on the worker,
-        # like app.py), then a few more frames — the live crash fired on the
-        # very first step, so surviving all of this is the regression bar.
+        # like app.py), then a few more frames: covers every engine entry
+        # point the app exercises across a thread boundary.
         step_on_worker(25)
         pool.submit(engine.inject, "BRIEFING: TEST").result()
         step_on_worker(5)
