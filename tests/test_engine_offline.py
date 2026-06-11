@@ -4,13 +4,16 @@ This is the engine's regression harness; it reuses the spike fixtures.
 Stochasticity note: seeded generation with temp 0.7/0.8 - a sampler or weights
 change can flip assertions. That is the point of a regression harness; if it
 fails after an upstream change, listen to the WAV before blaming the test."""
+import concurrent.futures
 from pathlib import Path
 
 import numpy as np
 import pytest
+import rustymimi
 import sphn
 
 from mlx_audio.tts.utils import load_model as load_tts_model
+from personaplex_mlx.persona_utils import DEFAULT_HF_REPO, get_or_download_mimi
 
 from moneypenny.engine import INJECT_AFTER_QUIET_FRAMES, KOKORO_MODEL, VoiceEngine
 from moneypenny.prompts import FRONT_OF_HOUSE
@@ -77,6 +80,63 @@ def test_gate_resets_between_briefings():
     assert eng._inject_waited == 0
     eng.inject_audio(np.ones(FRAME, dtype=np.float32))
     assert eng._gate_and_drain() is None
+
+
+def _decode_shell() -> VoiceEngine:
+    """Engine with only the mimi decoder + decode pipeline initialized: the
+    one-frame decode pipeline needs real mimi (cached weights) but not the 7B
+    model, so it can be tested without it."""
+    eng = VoiceEngine.__new__(VoiceEngine)
+    mimi_file = get_or_download_mimi(DEFAULT_HF_REPO, None)
+    eng._mimi = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
+    eng._mimi_decoder = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
+    eng._decode_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="mimi-decode"
+    )
+    eng._pending_decode = None
+    return eng
+
+
+def _token_frames(mimi: rustymimi.Tokenizer, n: int) -> list[np.ndarray]:
+    """Encode n distinct PCM frames into decoder-shaped (1, K, 1) uint32 tokens."""
+    rng = np.random.default_rng(7)
+    frames = []
+    for _ in range(n):
+        pcm = (rng.standard_normal(1920) * 0.1).astype(np.float32)
+        enc = np.asarray(mimi.encode_step(pcm[None, None, :]))
+        if enc.shape[1] == 1:  # (1, T=1, K) -> (1, K, T=1)
+            enc = enc.transpose(0, 2, 1)
+        frames.append(enc.astype(np.uint32))
+    return frames
+
+
+@pytest.mark.slow
+def test_decode_pipeline_delivers_previous_frame_in_order():
+    # step() must not block on THIS frame's mimi decode (~33ms of the 80ms
+    # budget): the pipeline submits the current frame and returns the previous
+    # one. Frame order and PCM content must match a synchronous decode of the
+    # same token stream on a fresh (identical-state) decoder.
+    eng = _decode_shell()
+    toks = _token_frames(eng._mimi, 2)
+
+    ref = rustymimi.Tokenizer(get_or_download_mimi(DEFAULT_HF_REPO, None), num_codebooks=8)
+    expected = [np.asarray(ref.decode_step(t))[0, 0] for t in toks]
+
+    assert eng._pipeline_decode(toks[0]) is None  # priming frame: nothing yet
+    np.testing.assert_array_equal(eng._pipeline_decode(toks[1]), expected[0])
+    # a frame with no model audio still flushes the previous decode
+    np.testing.assert_array_equal(eng._pipeline_decode(None), expected[1])
+    assert eng._pipeline_decode(None) is None
+
+
+@pytest.mark.slow
+def test_decode_pipeline_reset_drops_pending_frame():
+    eng = _decode_shell()
+    toks = _token_frames(eng._mimi, 2)
+    assert eng._pipeline_decode(toks[0]) is None
+    eng._reset_decode_pipeline()
+    # post-reset the pipeline primes again: the undelivered frame is dropped
+    assert eng._pipeline_decode(toks[1]) is None
 
 
 @pytest.mark.slow

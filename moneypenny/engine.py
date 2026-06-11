@@ -10,9 +10,21 @@ one worker; nothing here is locked. Construct and step on the SAME thread —
 MLX streams are thread-bound, so a VoiceEngine built on one thread cannot be
 stepped on another (RuntimeError "There is no Stream(gpu, N) in current
 thread.", then SIGBUS). The app constructs this on the engine worker.
+
+Decode pipeline (one-frame lag): mimi decode of the model's output audio is
+~33ms of CPU (rustymimi) and is output-only — it never feeds back into the
+LM. step() therefore submits the current frame's decode to a dedicated
+single-thread pool (numpy in, numpy out: no MLX crosses that thread) and
+returns the PREVIOUS frame's PCM, taking decode off the 80ms frame budget.
+Consequences: model audio reaches the speakers one frame (80ms) later, and
+the output-silence injection gate (quiet_frames) observes audio one frame
+late — both harmless at the gate's 25-frame threshold. Measured on M3 Ultra:
+idle step ~104ms synchronous vs ~70ms pipelined (the difference between 9.6
+and 12.5 fps; see docs/decisions/0002 known limitation 6).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import random
 import tempfile
 from pathlib import Path
@@ -114,7 +126,13 @@ class VoiceEngine:
         self._gen.reset_streaming()
         self._gen.step_system_prompts()
 
+        # Two mimi instances, not one: rustymimi.Tokenizer is a single
+        # RefCell-guarded object, so a decode_step on the decode pool while
+        # the engine thread runs encode_step panics with "Already borrowed".
+        # Encoder state and decoder state are independent streams anyway;
+        # the decoder instance is touched ONLY by the decode pool.
         self._mimi = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
+        self._mimi_decoder = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
 
         self._briefing_voice = briefing_voice
         # Kokoro loads eagerly: app startup loads everything anyway, the first
@@ -135,6 +153,13 @@ class VoiceEngine:
         self._quiet_frames = 0
         self._inject_waited = 0
         self.last_gate_wait_frames: int | None = None
+
+        # Decode pipeline (see module docstring): the pool thread only ever
+        # touches numpy + rustymimi, never MLX, so thread affinity holds.
+        self._decode_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mimi-decode"
+        )
+        self._pending_decode: concurrent.futures.Future | None = None
 
     @property
     def pending_injection(self) -> bool:
@@ -231,8 +256,37 @@ class VoiceEngine:
             self._pending_audio = remainder
         return chunk
 
+    def _decode_tokens(self, decode_in: np.ndarray) -> np.ndarray:
+        """Runs on the decode pool: stateful streaming decode, numpy-only.
+        Uses the dedicated decoder instance so it never contends with the
+        engine thread's encode_step borrow (see __init__)."""
+        return np.asarray(self._mimi_decoder.decode_step(decode_in))[0, 0]
+
+    def _pipeline_decode(self, decode_in: np.ndarray | None) -> np.ndarray | None:
+        """Submit this frame's decode (if any); deliver the PREVIOUS frame's PCM.
+
+        The 1-worker pool serializes decode_step calls in submission order, so
+        the stateful decoder sees the exact same token stream as a synchronous
+        decode would — only delivery is shifted by one frame."""
+        fut = (
+            self._decode_pool.submit(self._decode_tokens, decode_in)
+            if decode_in is not None
+            else None
+        )
+        prev = self._pending_decode
+        self._pending_decode = fut
+        return prev.result() if prev is not None else None
+
+    def _reset_decode_pipeline(self) -> None:
+        """Drop the undelivered frame; let an in-flight decode finish so the
+        decoder state stays consistent with the token stream it was fed."""
+        if self._pending_decode is not None:
+            self._pending_decode.result()
+            self._pending_decode = None
+
     def step(self, mic_frame: np.ndarray | None) -> tuple[np.ndarray | None, str]:
         """One 80ms step. Returns (model PCM frame or None, text piece or '').
+        The PCM is the PREVIOUS step's model audio (one-frame decode pipeline).
         Injection precedence (when gate is open): pending briefing PCM REPLACES the mic frame."""
         briefing_chunk = self._gate_and_drain()
         if briefing_chunk is not None:
@@ -249,11 +303,13 @@ class VoiceEngine:
             if tid not in _SPECIAL_TEXT_TOKENS:
                 text = self._text_tokenizer.id_to_piece(tid).replace("\u2581", " ")
 
-        audio_out: np.ndarray | None = None
         audio_tokens = self._gen.last_audio_tokens()
+        decode_in: np.ndarray | None = None
         if audio_tokens is not None:
-            decode = np.array(audio_tokens[:, :, None]).astype(np.uint32)
-            audio_out = np.asarray(self._mimi.decode_step(decode))[0, 0]
+            # np.array forces the MLX eval HERE, on the engine thread; the
+            # decode pool only ever sees plain numpy.
+            decode_in = np.array(audio_tokens[:, :, None]).astype(np.uint32)
+        audio_out = self._pipeline_decode(decode_in)
 
         quiet = audio_out is None or float(np.sqrt(np.mean(np.square(audio_out)))) < OUTPUT_QUIET_RMS
         self._quiet_frames = self._quiet_frames + 1 if quiet else 0
@@ -276,5 +332,6 @@ class VoiceEngine:
         self._quiet_frames = 0
         self._inject_waited = 0
         self.last_gate_wait_frames = None
+        self._reset_decode_pipeline()
         self._gen.reset_streaming()
         self._gen.step_system_prompts()

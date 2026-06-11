@@ -287,21 +287,75 @@ the live session):
    down to 12 with a warning; frames are never dropped during speech or
    hangover. Status line now reports `asr_on`. Sandbox smoke confirmed the gate
    (`asr_on=False asr_ms=0` at idle, micq oscillating 14–62, never monotonic).
-   **Measured go/no-go finding:** with ASR fully gated off, `step_ms≈183–213`
-   at idle — `engine.step` ALONE exceeds the 80ms frame budget on this hardware
-   (current `quantize_bits=8`), capping the loop at ~5.0–5.5 fps instead of
-   12.5. Consequences: (a) catch-up fires repeatedly (~every 6.5s, ~50 frames)
-   rather than once after warm-up — drift is bounded but permanent; (b) because
-   dropped frames are never seen by the VAD, a perpetually-behind loop can drop
-   a speech ONSET that arrives during backlog (observed in the smoke). Fixing
-   this is model-level work (e.g. 4-bit engine quantization), out of scope here.
-   Two environment notes for the live session: without headphones, speaker→mic
-   feedback keeps VAD in speech indefinitely (gate stays on, catch-up correctly
-   suppressed) — headphones are required as already specified; and the energy-
-   VAD threshold must sit above the room's noise floor (this room measured
-   ~0.013–0.019 RMS ambient vs the 0.01 default) — now tunable via
-   `VAD_RMS_THRESHOLD` (smoke used 0.03).
+
+   **RESOLVED — the `step_ms≈183–213` idle finding (was: "engine.step ALONE
+   exceeds the 80ms budget; model-level work is the fix").** Root-caused and
+   fixed 2026-06-11 on this hardware (Apple M3 Ultra, 96GB, macOS 25.5,
+   mlx 0.31.2, max_recommended_working_set 83.5GB). Hypotheses measured
+   (100-step medians, step(noise) = real mic-frame path unless noted):
+
+   | Hypothesis | Measurement | Verdict |
+   |---|---|---|
+   | H1 GPU/RAM pressure from co-residency | q8 engine-only 100.9ms → +router+ASR 103.5ms; active mem 10.6GB of 96GB (peak 11.2GB) | **Rejected** (+2.6ms; no pressure) |
+   | H2 4-bit engine quant | q4: engine-only 96.1ms, co-resident 95.8ms (mem 7.2GB) | **Rejected** (~5ms vs q8; doesn't reach ≤80ms; default stays `quantize_bits=8`, no QUANTIZE_BITS knob added) |
+   | H3 executor/asyncio overhead | direct-on-worker 185.5ms vs via run_in_executor 188.2ms | **Rejected** (~3ms) |
+   | Context growth | medians 189.8 → 193.9ms from ~700 to ~3300 frames | Rejected (~4ms/4.5min; not the gap) |
+   | **Import affinity (found)** | same engine+thread: mlx stack first imported on MAIN thread → 183–188ms; first imported ON the engine worker → **103.8ms** | **Confirmed root cause #1** |
+   | Synchronous mimi decode | step = mimi encode ~36ms (CPU rustymimi) + LM ~30ms + mimi decode ~33ms (CPU) | **Confirmed root cause #2** (decode is output-only; needn't block the frame) |
+
+   The import-affinity penalty (~+80ms/frame on every MLX eval from the
+   engine worker) reproduces regardless of thread QoS
+   (`pthread_set_qos_class_self_np` before/after MLX init: no effect), MLX
+   stream ids (worker owning `Stream(gpu, 0)` still slow), and is absent in
+   pure-MLX micro-benchmarks; macOS `sample` profiles show the delta as
+   malloc/free churn inside `mlx::core::eval` on the non-importing thread
+   (xzone-malloc per-thread behavior suspected, not proven). Reproduce with
+   `spikes/perf_import_affinity.py`; H1/H2 with `spikes/perf_coresidency.py`;
+   H3/context with `spikes/perf_executor_and_context.py`.
+
+   **Fix shipped (config unchanged, `quantize_bits=8`):** (a) `app.py` defers
+   all mlx-touching imports into the model loader functions so the engine
+   worker is the first thread to import mlx (guarded by
+   `tests/test_app_imports.py`; `RouteDecision` moved to the mlx-free
+   `moneypenny/route_decision.py` so ToolHost doesn't pull in `mlx_lm`);
+   (b) `engine.py` pipelines mimi decode onto a dedicated 1-worker pool with
+   one frame of lag (decode never feeds back into the LM; model audio reaches
+   speakers 80ms later; the injection quiet-gate observes output one frame
+   late — harmless at its 25-frame threshold; a second `rustymimi.Tokenizer`
+   instance is used for decode because the PyO3 object is RefCell-guarded and
+   concurrent encode/decode on one instance panics "Already borrowed").
+
+   **Verified:** offline, co-resident step(noise) 103.8ms / step(None) 66.7ms
+   on the fixed import shape; ASR add_frame on the loop thread unchanged
+   (93.5ms/pair vs 86.8ms baseline), router.classify on its worker 240.7ms p50
+   (matches the 235ms P0.2 record; on the broken import shape it was 390ms).
+   Live smoke (75s, `VAD_RMS_THRESHOLD=0.03`): after one warm-up catch-up,
+   **fps=12.5 steady with step_ms=58–65 and micq=0 throughout — including
+   while the model speaks**; spkq plateaued at 14 (the known inject/warm-up
+   ratchet, limitation 1). The slow engine regression
+   (`test_question_briefing_answer_cycle`, seed 42424242, q8) passes unchanged
+   — no re-pin of the fact-uptake trajectory was needed.
+
+   Residual fps risk is now confined to USER speech (ASR adds ~47ms/frame
+   amortized while the gate is on → bounded dip, drains in silence), plus the
+   environment notes for the live session: without headphones, speaker→mic
+   feedback keeps VAD in speech indefinitely (gate stays on, catch-up
+   correctly suppressed) — headphones are required as already specified; and
+   the energy-VAD threshold must sit above the room's noise floor (this room
+   measured ~0.013–0.019 RMS ambient vs the 0.01 default) — tunable via
+   `VAD_RMS_THRESHOLD` (smokes used 0.03).
 7. **Briefing drain vs. live mic:** while a briefing drains, the model hears the
    briefing audio but ASR/VAD still hear the real mic — user speech during a drain can
    queue a second briefing the model has no conversational antecedent for. Phase 2
    should consider suppressing classification while a drain is active.
+8. **NEW — rustymimi 8192-position session ceiling (discovered during the perf
+   investigation's context-growth probe):** after ~4096 cumulative engine
+   steps (~5.5 minutes of session at 12.5 fps), `rustymimi.Tokenizer.encode_step`
+   crashes hard with `ValueError: narrow invalid args start + len > dim_len:
+   [8192, 32], dim: 0, start: 8192, len: 2` — the streaming encoder's internal
+   transformer cache is a fixed 8192 positions (2 per 80ms frame) with no
+   rotation. The live app will die mid-session at roughly the 5.5-minute mark
+   of continuous running. Upstream (rustymimi) fix or periodic
+   encoder-state reset is Phase 2 work; reproduced deterministically by
+   `spikes/perf_executor_and_context.py` (crash at the end of its run is this
+   bug, not a harness defect).

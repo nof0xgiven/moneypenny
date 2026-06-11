@@ -55,6 +55,12 @@ voice:
 .venv/bin/moneypenny
 ```
 
+The frame loop runs real time at idle on an M3 Ultra (fps=12.5, step≈64ms;
+see decision 0002, known limitation 6 for the measurements behind this).
+Known ceiling: a continuous session currently crashes after ~5.5 minutes
+(rustymimi 8192-position streaming-cache limit — decision 0002, known
+limitation 8).
+
 ## Choosing voices
 
 Two independent voices, selected via environment variables:

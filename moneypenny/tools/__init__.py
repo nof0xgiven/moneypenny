@@ -11,7 +11,7 @@ catches and converts them to failure briefings.
 from __future__ import annotations
 
 from moneypenny.briefing import compose
-from moneypenny.router import RouteDecision
+from moneypenny.route_decision import RouteDecision
 from moneypenny.tools.timers import TimerService, parse_duration
 from moneypenny.tools.weather import current_weather, format_weather
 

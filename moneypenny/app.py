@@ -30,6 +30,18 @@ route worker (which also rebinds mlx_lm's import-time generation_stream — see
 router.py), and the ASR transcriber on the event-loop thread where add_frame
 runs. The pools therefore exist before the models load.
 
+Import affinity (measured hard requirement, the one sanctioned exception to
+the imports-at-top rule): the MLX stack (engine/asr/router modules) is
+imported INSIDE the loader functions, not at module top, so that the engine
+worker is the first thread in the process to import mlx. Measured on this
+hardware (M3 Ultra): with mlx first imported on the main thread and the
+engine constructed on its worker, engine.step pays ~+80ms/frame (~183ms vs
+~104ms co-resident; profiling shows the extra time as malloc/free churn
+inside mlx eval on the non-importing thread). Thread QoS, MLX stream ids,
+and executor overhead were each ruled out by measurement; import thread is
+the reproducible lever. Guarded by tests/test_app_imports.py; numbers in
+docs/decisions/0002 known limitation 6.
+
 Known accepted limitation: if the user resumes speaking after maybe_end and
 changes the meaning, an already-executed read-only tool (weather) is harmless;
 Homey/timer commands need the full command present in the partial to classify
@@ -51,11 +63,11 @@ logged). Frames are never dropped while in speech or ASR hangover - dropping
 mid-utterance would corrupt the transcript; dropping silence just loses room
 tone. Residual risk: fps can still dip below 12.5 during speech (ASR on),
 but the dip is bounded and the queue drains in the following silence.
-Measured caveat (see decision 0002 known-limitation 6): on current hardware
-engine.step alone runs ~183-213ms at idle (> the 80ms budget), so catch-up
-fires periodically rather than once - and a speech onset arriving while the
-loop is behind can be dropped unseen. Model-level work (e.g. 4-bit engine
-quant) is the fix; out of scope for the gating change.
+Step budget (see decision 0002 known-limitation 6): the original ~183-213ms
+idle step was the import-affinity penalty (fixed here via deferred imports)
+plus synchronous mimi decode (fixed in engine.py via the one-frame decode
+pipeline); idle step is now ~70ms, inside the 80ms budget, so catch-up only
+fires after genuine stalls (inject TTS) rather than perpetually.
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real
@@ -75,21 +87,48 @@ import numpy as np
 import sounddevice as sd
 from dotenv import load_dotenv
 
-from moneypenny.asr import StreamingTranscriber
+# NOTE: moneypenny.engine / .asr / .router are deliberately NOT imported here.
+# They pull in the MLX stack, and the engine worker must be the first thread
+# to import it (see "Import affinity" in the module docstring).
 from moneypenny.asr_gate import AsrGate
 from moneypenny.audio import AudioIO
 from moneypenny.briefing import compose
 from moneypenny.config import Config
-from moneypenny.engine import VoiceEngine
 from moneypenny.injection import InjectionQueue
 from moneypenny.prompts import FRONT_OF_HOUSE
-from moneypenny.router import Router
 from moneypenny.tools import ToolHost
 from moneypenny.tools.homey_adapter import HomeyAdapter
 from moneypenny.tools.timers import TimerService
 from moneypenny.vad import EnergyVAD
 
 log = logging.getLogger("moneypenny")
+
+
+def _load_engine(cfg: Config):
+    """Runs on the engine worker: first mlx import in the process + construction."""
+    from moneypenny.engine import VoiceEngine
+
+    return VoiceEngine(
+        system_prompt=FRONT_OF_HOUSE,
+        voice=cfg.voice,
+        quantize_bits=cfg.quantize_bits,
+        briefing_voice=cfg.briefing_voice,
+    )
+
+
+def _load_router(cfg: Config):
+    """Runs on the route worker (mlx_lm import + construction)."""
+    from moneypenny.router import Router
+
+    return Router(model_id=cfg.router_model)
+
+
+def _load_asr(cfg: Config):
+    """Runs on the event-loop thread, where add_frame runs (after the engine
+    worker has already claimed the first mlx import)."""
+    from moneypenny.asr import StreamingTranscriber
+
+    return StreamingTranscriber(model_id=cfg.asr_model)
 
 STATUS_EVERY_FRAMES = 25  # ~2s of audio at 12.5 fps
 CATCHUP_TRIGGER_FRAMES = 60  # ~5s behind real time: start dropping silence
@@ -142,14 +181,11 @@ async def main() -> None:
     route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
 
     log.info("loading models (engine, router, asr)...")
-    engine = await loop.run_in_executor(
-        engine_pool,
-        lambda: VoiceEngine(system_prompt=FRONT_OF_HOUSE, voice=cfg.voice,
-                            quantize_bits=cfg.quantize_bits,
-                            briefing_voice=cfg.briefing_voice),
-    )
-    router = await loop.run_in_executor(route_pool, lambda: Router(model_id=cfg.router_model))
-    asr = StreamingTranscriber(model_id=cfg.asr_model)  # loop thread: add_frame runs here
+    # Engine FIRST: its worker must win the first-mlx-import race (import
+    # affinity, module docstring) before the route pool or loop thread touch mlx.
+    engine = await loop.run_in_executor(engine_pool, _load_engine, cfg)
+    router = await loop.run_in_executor(route_pool, _load_router, cfg)
+    asr = _load_asr(cfg)  # loop thread: add_frame runs here
     vad = EnergyVAD(rms_threshold=cfg.vad_rms_threshold)
     gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
     injections = InjectionQueue()

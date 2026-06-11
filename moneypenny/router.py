@@ -14,10 +14,11 @@ import json
 import math
 import re
 import threading
-from dataclasses import dataclass
 
 import mlx.core as mx
 from mlx_lm import generate, load
+
+from moneypenny.route_decision import RouteDecision
 
 # `import mlx_lm.generate as ...` would bind the generate FUNCTION (mlx_lm's
 # __init__ re-exports it, shadowing the submodule attribute); we need the
@@ -85,14 +86,6 @@ def _ensure_generation_stream_on_this_thread() -> None:
     if _stream_owner != me:
         _mlx_lm_generate.generation_stream = mx.new_stream(mx.default_device())
         _stream_owner = me
-
-
-@dataclass(frozen=True)
-class RouteDecision:
-    tier: int
-    tool: str | None
-    args: dict
-    confidence: float
 
 
 def parse_decision(raw: str) -> RouteDecision:
