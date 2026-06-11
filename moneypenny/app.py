@@ -28,6 +28,18 @@ unbounded speaker_frames queue. After catch-up, production and consumption
 both run at 12.5 fps again, so the queue depth gained during the stall never
 drains: every stall permanently adds its duration to mouth-to-ear latency for
 the rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
+
+Known Phase 1 limitation - per-frame ASR on the event-loop thread:
+asr.add_frame runs inference on the frame-loop (event-loop) thread each 80ms
+frame. If asr + vad + the awaited engine.step ever exceed the 80ms frame
+budget, the unbounded mic_frames queue grows without backpressure - watch
+queue depth during the live session.
+
+Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
+drains, the model hears the briefing audio but ASR/VAD still hear the real
+mic. User speech during a drain can therefore classify and queue a second
+briefing for which the model has no conversational antecedent.
+TODO(phase2): consider suppressing classification while a drain is active.
 """
 from __future__ import annotations
 
@@ -87,7 +99,8 @@ async def main() -> None:
 
     log.info("loading models (engine, router, asr)...")
     engine = VoiceEngine(system_prompt=FRONT_OF_HOUSE, voice=cfg.voice,
-                         quantize_bits=cfg.quantize_bits)
+                         quantize_bits=cfg.quantize_bits,
+                         briefing_voice=cfg.briefing_voice)
     router = Router(model_id=cfg.router_model)
     asr = StreamingTranscriber(model_id=cfg.asr_model)
     vad = EnergyVAD()

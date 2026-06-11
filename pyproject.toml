@@ -9,6 +9,8 @@ dependencies = [
     "loguru",
     "misaki[en]",
     "parakeet-mlx",
+    "rustymimi",
+    "sentencepiece",
     "sphn",
     "sounddevice==0.5",
     "numpy",

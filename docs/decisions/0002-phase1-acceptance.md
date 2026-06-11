@@ -273,3 +273,11 @@ the live session):
 5. **Interpreter-shutdown SIGBUS** after `VoiceEngine` teardown (exit 138 post-summary
    in the slow suite and the fact-bait harness) — cosmetic for local runs, matters for
    exit-code-gated CI.
+6. **Per-frame ASR on the event-loop thread:** `asr.add_frame` runs inference on the
+   frame-loop thread every 80ms frame; if asr + vad + engine.step ever exceed the 80ms
+   frame budget, the unbounded mic queue grows without backpressure — watch queue depth
+   during the live session.
+7. **Briefing drain vs. live mic:** while a briefing drains, the model hears the
+   briefing audio but ASR/VAD still hear the real mic — user speech during a drain can
+   queue a second briefing the model has no conversational antecedent for. Phase 2
+   should consider suppressing classification while a drain is active.

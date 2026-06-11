@@ -11,6 +11,7 @@ def test_loads_from_env(monkeypatch):
     cfg = Config.from_env()
     assert cfg.homey_base_url == "http://h.local"
     assert cfg.weather_lat == pytest.approx(25.1)
+    assert cfg.briefing_voice == "am_michael"
 
 
 def test_missing_required_raises(monkeypatch):

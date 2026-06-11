@@ -19,6 +19,7 @@ class Config:
     router_model: str = "mlx-community/Qwen3-0.6B-4bit"
     asr_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
     voice: str = "NATF2"
+    briefing_voice: str = "am_michael"
     quantize_bits: int = 8
 
     @classmethod
