@@ -12,29 +12,34 @@ class Config:
     FRAME: ClassVar[int] = 1920  # samples per 80ms model step
     ASR_SAMPLE_RATE: ClassVar[int] = 16000
 
-    homey_base_url: str
-    homey_api_key: str
     weather_lat: float
     weather_lon: float
+    homey_base_url: str | None = None
+    homey_api_key: str | None = None
     router_model: str = "mlx-community/Qwen3-0.6B-4bit"
     asr_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
     voice: str = "NATF2"
     briefing_voice: str = "am_michael"
     quantize_bits: int = 8
 
+    @property
+    def homey_configured(self) -> bool:
+        """True only when both Homey vars are present and non-empty."""
+        return bool(self.homey_base_url) and bool(self.homey_api_key)
+
     @classmethod
     def from_env(cls) -> "Config":
         """Build a Config from os.environ (pure read, no .env loading).
 
         The app entry point (app.main) is responsible for calling
-        dotenv.load_dotenv() before invoking this.
+        dotenv.load_dotenv() before invoking this. Homey vars are optional:
+        the app runs without home control when they are unset.
         """
-        missing = [k for k in ("HOMEY_BASE_URL", "HOMEY_API_KEY") if not os.environ.get(k)]
-        if missing:
-            raise ValueError(f"missing required env: {', '.join(missing)}")
         return cls(
-            homey_base_url=os.environ["HOMEY_BASE_URL"],
-            homey_api_key=os.environ["HOMEY_API_KEY"],
+            homey_base_url=os.environ.get("HOMEY_BASE_URL") or None,
+            homey_api_key=os.environ.get("HOMEY_API_KEY") or None,
             weather_lat=float(os.environ.get("WEATHER_LAT", "25.2048")),
             weather_lon=float(os.environ.get("WEATHER_LON", "55.2708")),
+            voice=os.environ.get("MONEYPENNY_VOICE", "NATF2"),
+            briefing_voice=os.environ.get("BRIEFING_VOICE", "am_michael"),
         )

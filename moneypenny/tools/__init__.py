@@ -30,6 +30,10 @@ class ToolHost:
             w = current_weather(self._cfg.weather_lat, self._cfg.weather_lon)
             return compose("briefing", format_weather(w))
         if decision.tool == "homey":
+            if self._homey is None:
+                # No adapter configured: there is no action possible, so the
+                # useful outcome IS the spoken explanation.
+                return compose("briefing", "HOME CONTROL NOT SET UP CANNOT DO THAT")
             args = decision.args
             action = args.get("action")
             device = args.get("device")

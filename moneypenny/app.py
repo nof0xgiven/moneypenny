@@ -109,8 +109,19 @@ async def main() -> None:
         on_fire=lambda label: injections.put(compose("briefing", f"TIMER DONE {label.upper()}")),
         loop=loop,
     )
-    host = ToolHost(cfg, HomeyAdapter.from_config(cfg), timers)
-    log.info("models loaded")
+    homey = None
+    if cfg.homey_configured:
+        try:
+            homey = HomeyAdapter.from_config(cfg)
+        except Exception:
+            log.exception(
+                "home control DISABLED: HomeyAdapter construction failed "
+                "(box unreachable or bad credentials?) - continuing without it"
+            )
+    else:
+        log.info("home control DISABLED: HOMEY_BASE_URL/HOMEY_API_KEY not set")
+    host = ToolHost(cfg, homey, timers)
+    log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
 
     engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
     route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")

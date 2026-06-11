@@ -32,6 +32,19 @@ def host():
     loop.close()
 
 
+def test_homey_decision_with_no_adapter_briefs_not_set_up():
+    loop = asyncio.new_event_loop()
+    try:
+        timers = TimerService(on_fire=lambda l: None, loop=loop)
+        h = ToolHost(Cfg(), None, timers)
+        args = {"action": "turn_off", "device": "desk lamp"}
+        out = h.execute(RouteDecision(1, "homey", args, 0.9))
+        assert out.startswith("BRIEFING:")
+        assert "NOT SET UP" in out
+    finally:
+        loop.close()
+
+
 def test_tier0_returns_none(host):
     h, _ = host
     assert h.execute(RouteDecision(0, None, {}, 0.9)) is None
