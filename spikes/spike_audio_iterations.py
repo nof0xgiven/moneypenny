@@ -79,10 +79,11 @@ def run_variant(
     briefing_wav: Path,
     beat_seconds: float,
     tail_seconds: float = 12.0,
+    seed: int = 42424242,
 ) -> None:
     print(f"=== variant {name}: beat={beat_seconds}s tail={tail_seconds}s "
-          f"briefing={briefing_wav.name} ===")
-    s = load_session(system_prompt=system_prompt)
+          f"briefing={briefing_wav.name} seed={seed} ===")
+    s = load_session(system_prompt=system_prompt, seed=seed)
     s.step_wav(OUT / "question.wav")
     s.run_free(beat_seconds)
     s.step_wav(briefing_wav)
@@ -119,8 +120,22 @@ VARIANTS = {
 }
 
 
+def run_seed_sweep(seeds: list[int]) -> None:
+    """Robustness check: c1 (original voice) and c5 (male voice) recipes,
+    both with 6s beat + 12s tail, at each given seed."""
+    for seed in seeds:
+        run_variant(f"c1_seed{seed}", SPIKE_SYSTEM_PROMPT, BRIEFING_WAV,
+                    beat_seconds=6.0, seed=seed)
+        run_variant(f"c5_seed{seed}", SPIKE_SYSTEM_PROMPT, make_male_briefing(),
+                    beat_seconds=6.0, seed=seed)
+
+
 def main() -> None:
-    names = sys.argv[1:] or list(VARIANTS)
+    args = sys.argv[1:]
+    if args and args[0] == "--seeds":
+        run_seed_sweep([int(s) for s in args[1].split(",")])
+        return
+    names = args or list(VARIANTS)
     for n in names:
         VARIANTS[n]()
 
