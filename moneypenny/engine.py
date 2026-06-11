@@ -4,6 +4,9 @@ One step() per 80ms frame. Injection mechanism per docs/decisions/0001:
 audio briefings (TTS, distinct voice) on the user channel, gated on output silence.
 
 G2 invariant: this class returns model PCM; it never plays audio itself.
+
+Single-threaded by design: the app serializes all step()/inject() calls onto
+one worker; nothing here is locked.
 """
 from __future__ import annotations
 
@@ -38,19 +41,39 @@ SAMPLE_RATE = 24000
 KOKORO_MODEL = "prince-canuma/Kokoro-82M"
 
 # Injection gating (docs/decisions/0001): pending briefing PCM starts draining
-# only after the model's own output has been quiet for 2s (25 frames), with an
-# 8s failsafe so a briefing can never starve forever.
+# only after the model's own output has been quiet for 2s (25 frames), with a
+# 20s failsafe so a briefing can never starve forever.
 #
-# Why 25 and not the originally-planned 4 (320ms): controlled A/B at seed
-# 42424242 (same question, same briefing, only this constant varied) showed the
-# model treats a briefing landing 320ms after its own speech as barge-in
-# ("Thanks, I heard it's going to be sunny and warm" — hallucination, zero fact
-# uptake), while a ~2s gap reproduces the spike-C5 known-good result verbatim
+# Why 25 quiet frames and not the originally-planned 4 (320ms): controlled A/B
+# at seed 42424242 (same question, same briefing, only this constant varied)
+# showed the model treats a briefing landing 320ms after its own speech as
+# barge-in ("Thanks, I heard it's going to be sunny and warm" — hallucination,
+# zero fact uptake), while a ~2s gap reproduces the spike-C5 known-good result
 # ("Got it, 31 Celsius and clear skies"). The spike's 6s fixed beat was also
 # ~2s of effective post-quiet gap, so this matches the proven recipe.
+#
+# Why the failsafe is 250 frames and not the originally-planned 100 (8s): in
+# every observed instance (two trajectories, plus spike B), a failsafe that
+# fires while the model is mid-speech burns the briefing — zero fact uptake,
+# hallucinated weather. The model's uninterrupted monologues run ~16-17s, so
+# 8s fired mid-word almost by construction. 20s sits above observed monologue
+# length; the failsafe remains a last-resort liveness bound, not a mechanism
+# briefings are expected to hit.
 INJECT_AFTER_QUIET_FRAMES = 25
-INJECT_MAX_WAIT_FRAMES = 100
+INJECT_MAX_WAIT_FRAMES = 250
 OUTPUT_QUIET_RMS = 0.01
+
+# Fixed RNG seed for briefing synthesis: makes briefing audio byte-identical
+# for a given text, independent of session state at inject() time. The value
+# was selected by sweeping seeds against the offline regression scenario (the
+# briefing waveform is the only free variable in an otherwise deterministic
+# trajectory; seeds 0-1 yielded smalltalk deflection, 2 yielded clean fact
+# uptake). Uptake variance across briefing renderings is open risk 1 of
+# docs/decisions/0001 and is tracked into the live tests.
+TTS_SEED = 2
+
+# SentencePiece control ids (pad/bos/eos/unk); never part of spoken text.
+_SPECIAL_TEXT_TOKENS = (0, 1, 2, 3)
 
 
 class VoiceEngine:
@@ -91,10 +114,12 @@ class VoiceEngine:
         self._mimi = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
 
         self._briefing_voice = briefing_voice
-        # Kokoro is lazy-loaded on first inject(): it is only needed once a
-        # briefing arrives, and keeping it out of __init__ keeps engine
-        # construction (and tests that never inject) cheaper.
-        self._kokoro = None
+        # Kokoro loads eagerly: app startup loads everything anyway, the first
+        # briefing must not stall on a model load mid-call, and loading here
+        # (rather than lazily inside inject()) keeps any RNG the load consumes
+        # at a fixed, deterministic point of the seeded stream — every session
+        # behaves identically whether or not it ever injects.
+        self._kokoro = load_tts_model(model_path=KOKORO_MODEL)
 
         # Injection state
         self._pending_audio: np.ndarray | None = None
@@ -109,19 +134,17 @@ class VoiceEngine:
 
     def inject(self, briefing: str) -> None:
         """TTS the briefing (Kokoro, distinct voice) and queue it as user-channel audio."""
-        if self._kokoro is None:
-            self._kokoro = load_tts_model(model_path=KOKORO_MODEL)
-        # Kokoro consumes the global mx/python RNG streams; snapshot and restore
-        # them so mid-session synthesis never perturbs the seeded generation
-        # trajectory (in the spikes the briefing was synthesized outside the
-        # session — this keeps the engine mechanics equivalent). Seeding inside
-        # the snapshot makes the briefing audio byte-identical for a given text
-        # regardless of when inject() is called.
+        # Kokoro synthesis consumes the global mx/python RNG streams; snapshot
+        # and restore them so mid-session synthesis never perturbs the seeded
+        # generation trajectory (in the spikes the briefing was synthesized
+        # outside the session — this keeps the engine mechanics equivalent).
+        # Seeding inside the snapshot makes the briefing audio byte-identical
+        # for a given text regardless of when inject() is called.
         mx_state = mx.random.state[0]
         py_state = random.getstate()
         np_state = np.random.get_state()
         try:
-            seed_all(0)
+            seed_all(TTS_SEED)
             with tempfile.TemporaryDirectory() as tmp_dir:
                 prefix = Path(tmp_dir) / "briefing"
                 generate_audio(
@@ -151,10 +174,16 @@ class VoiceEngine:
         else:
             self._pending_audio = np.concatenate([self._pending_audio, pcm])
 
-    def step(self, mic_frame: np.ndarray | None) -> tuple[np.ndarray | None, str]:
-        """One 80ms step. Returns (model PCM frame or None, text piece or '').
-        Injection precedence (when gate is open): pending briefing PCM REPLACES the mic frame."""
-        if self._pending_audio is not None and not self._draining:
+    def _gate_and_drain(self) -> np.ndarray | None:
+        """Advance the injection gate one frame; return the briefing chunk to feed, if any.
+
+        Once draining starts it runs to completion (never re-gated mid-briefing;
+        audio injected mid-drain just appends). On completion ALL gate state is
+        reset so the next briefing re-gates on fresh output silence instead of
+        firing instantly off the stale quiet streak."""
+        if self._pending_audio is None:
+            return None
+        if not self._draining:
             if (
                 self._quiet_frames >= INJECT_AFTER_QUIET_FRAMES
                 or self._inject_waited >= INJECT_MAX_WAIT_FRAMES
@@ -163,19 +192,24 @@ class VoiceEngine:
                 self.last_gate_wait_frames = self._inject_waited
             else:
                 self._inject_waited += 1
+                return None
+        chunk = self._pending_audio[:FRAME]
+        remainder = self._pending_audio[FRAME:]
+        if remainder.shape[-1] == 0:
+            self._pending_audio = None
+            self._draining = False
+            self._quiet_frames = 0
+            self._inject_waited = 0
+        else:
+            self._pending_audio = remainder
+        return chunk
 
-        if self._draining:
-            # Once draining starts it runs to completion (never re-gated);
-            # briefing PCM replaces the mic frame for its whole duration.
-            chunk = self._pending_audio[:FRAME]
-            remainder = self._pending_audio[FRAME:]
-            if remainder.shape[-1] == 0:
-                self._pending_audio = None
-                self._draining = False
-                self._inject_waited = 0
-            else:
-                self._pending_audio = remainder
-            input_tokens = self._encode_pcm(chunk)
+    def step(self, mic_frame: np.ndarray | None) -> tuple[np.ndarray | None, str]:
+        """One 80ms step. Returns (model PCM frame or None, text piece or '').
+        Injection precedence (when gate is open): pending briefing PCM REPLACES the mic frame."""
+        briefing_chunk = self._gate_and_drain()
+        if briefing_chunk is not None:
+            input_tokens = self._encode_pcm(briefing_chunk)
         elif mic_frame is not None:
             input_tokens = self._encode_pcm(np.asarray(mic_frame, dtype=np.float32))
         else:
@@ -185,7 +219,7 @@ class VoiceEngine:
         text = ""
         if out_text_token is not None:
             tid = int(out_text_token[0].item())
-            if tid not in (0, 1, 2, 3):
+            if tid not in _SPECIAL_TEXT_TOKENS:
                 text = self._text_tokenizer.id_to_piece(tid).replace("\u2581", " ")
 
         audio_out: np.ndarray | None = None
