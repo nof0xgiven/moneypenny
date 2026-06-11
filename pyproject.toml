@@ -5,6 +5,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "mlx-lm",
     "mlx-audio",
+    # Kokoro deps not declared by mlx-audio itself:
+    "loguru",
+    "misaki[en]",
     "parakeet-mlx",
     "sounddevice==0.5",
     "numpy",
