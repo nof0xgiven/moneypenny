@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import ClassVar
 
 from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
 class Config:
-    SAMPLE_RATE = 24000
-    FRAME = 1920  # samples per 80ms model step
-    ASR_SAMPLE_RATE = 16000
+    SAMPLE_RATE: ClassVar[int] = 24000
+    FRAME: ClassVar[int] = 1920  # samples per 80ms model step
+    ASR_SAMPLE_RATE: ClassVar[int] = 16000
 
     homey_base_url: str
     homey_api_key: str
