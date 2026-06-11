@@ -4,6 +4,8 @@ Deliberately dumb: RMS threshold + trailing-silence counts. Parakeet partials
 provide the words; this only provides boundaries:
   maybe_end     - soft boundary (default 160ms silence): start classifying (P0.1)
   utterance_end - hard boundary (default 640ms): utterance confirmed over
+maybe_end may fire more than once per utterance when speech resumes after a
+soft boundary; consumers must tolerate repeated maybe_end events.
 Replace with a model VAD only if real-mic testing shows it failing."""
 from __future__ import annotations
 
