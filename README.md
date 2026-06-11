@@ -69,7 +69,9 @@ Two independent voices, selected via environment variables:
   briefings onto the model's user-audio channel: **only the model hears it**,
   never the speakers. `am_michael` is the spike-proven value; any other Kokoro
   voice (e.g. `af_heart`, `bm_george`, `bf_emma`, `am_adam`) is untested
-  territory here. Whatever you pick, keep it clearly distinct from the actual
+  territory here. A typo'd voice fails fast: startup runs a one-word synthesis
+  probe and aborts with an error naming the voice, rather than failing
+  silently at the first briefing. Whatever you pick, keep it clearly distinct from the actual
   user's voice — distinctness is what stops the model treating briefings as
   user speech (see `docs/decisions/0001-injection-mechanism.md`).
 

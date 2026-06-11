@@ -16,11 +16,21 @@ from moneypenny.tools.timers import TimerService, parse_duration
 from moneypenny.tools.weather import current_weather, format_weather
 
 
+# Briefing per reason the homey adapter is absent. ToolHost stays dumb: the
+# app decides the status; this is just a lookup.
+_NO_HOMEY_BRIEFINGS = {
+    "unconfigured": "HOME CONTROL NOT SET UP CANNOT DO THAT",
+    "unavailable": "HOME CONTROL UNAVAILABLE RIGHT NOW CANNOT DO THAT",
+}
+
+
 class ToolHost:
-    def __init__(self, cfg, homey_adapter, timer_service: TimerService) -> None:
+    def __init__(self, cfg, homey_adapter, timer_service: TimerService,
+                 homey_status: str = "unconfigured") -> None:
         self._cfg = cfg
         self._homey = homey_adapter
         self._timers = timer_service
+        self._no_homey_briefing = _NO_HOMEY_BRIEFINGS[homey_status]
 
     def execute(self, decision: RouteDecision) -> str | None:
         """Returns a composed briefing string, or None when there is nothing to say."""
@@ -31,9 +41,9 @@ class ToolHost:
             return compose("briefing", format_weather(w))
         if decision.tool == "homey":
             if self._homey is None:
-                # No adapter configured: there is no action possible, so the
-                # useful outcome IS the spoken explanation.
-                return compose("briefing", "HOME CONTROL NOT SET UP CANNOT DO THAT")
+                # No adapter: there is no action possible, so the useful
+                # outcome IS the spoken explanation (set up vs. unreachable).
+                return compose("briefing", self._no_homey_briefing)
             args = decision.args
             action = args.get("action")
             device = args.get("device")

@@ -110,17 +110,19 @@ async def main() -> None:
         loop=loop,
     )
     homey = None
+    homey_status = "unconfigured"
     if cfg.homey_configured:
         try:
             homey = HomeyAdapter.from_config(cfg)
         except Exception:
+            homey_status = "unavailable"
             log.exception(
                 "home control DISABLED: HomeyAdapter construction failed "
                 "(box unreachable or bad credentials?) - continuing without it"
             )
     else:
         log.info("home control DISABLED: HOMEY_BASE_URL/HOMEY_API_KEY not set")
-    host = ToolHost(cfg, homey, timers)
+    host = ToolHost(cfg, homey, timers, homey_status=homey_status)
     log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
 
     engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")

@@ -10,11 +10,36 @@ import numpy as np
 import pytest
 import sphn
 
-from moneypenny.engine import INJECT_AFTER_QUIET_FRAMES, VoiceEngine
+from mlx_audio.tts.utils import load_model as load_tts_model
+
+from moneypenny.engine import INJECT_AFTER_QUIET_FRAMES, KOKORO_MODEL, VoiceEngine
 from moneypenny.prompts import FRONT_OF_HOUSE
 
 FRAME = 1920
 QUESTION_WAV = Path(__file__).parent.parent / "spikes" / "out" / "question.wav"
+
+
+def _kokoro_shell(voice: str) -> VoiceEngine:
+    """Engine with only the briefing-TTS state initialized: the voice probe
+    needs Kokoro but not the 7B model, so it can be tested without it."""
+    eng = VoiceEngine.__new__(VoiceEngine)
+    eng._briefing_voice = voice
+    eng._kokoro = load_tts_model(model_path=KOKORO_MODEL)
+    return eng
+
+
+@pytest.mark.slow
+def test_briefing_voice_probe_fails_fast_on_bad_voice():
+    # generate_audio swallows a bad-voice load error (prints it, writes no
+    # wav); the probe must still turn that into a startup error naming the voice.
+    eng = _kokoro_shell("no_such_voice")
+    with pytest.raises(RuntimeError, match="no_such_voice"):
+        eng._probe_briefing_voice()
+
+
+@pytest.mark.slow
+def test_briefing_voice_probe_accepts_good_voice():
+    _kokoro_shell("am_michael")._probe_briefing_voice()
 
 
 def _gate_shell() -> VoiceEngine:

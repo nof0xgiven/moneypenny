@@ -120,6 +120,11 @@ class VoiceEngine:
         # at a fixed, deterministic point of the seeded stream — every session
         # behaves identically whether or not it ever injects.
         self._kokoro = load_tts_model(model_path=KOKORO_MODEL)
+        # Fail fast on a typo'd briefing voice. The probe synthesizes inside
+        # the same RNG snapshot/restore discipline as inject(), so it cannot
+        # perturb the seeded generation trajectory regardless of where in
+        # __init__ it runs.
+        self._probe_briefing_voice()
 
         # Injection state
         self._pending_audio: np.ndarray | None = None
@@ -134,12 +139,31 @@ class VoiceEngine:
 
     def inject(self, briefing: str) -> None:
         """TTS the briefing (Kokoro, distinct voice) and queue it as user-channel audio."""
-        # Kokoro synthesis consumes the global mx/python RNG streams; snapshot
-        # and restore them so mid-session synthesis never perturbs the seeded
-        # generation trajectory (in the spikes the briefing was synthesized
-        # outside the session — this keeps the engine mechanics equivalent).
-        # Seeding inside the snapshot makes the briefing audio byte-identical
-        # for a given text regardless of when inject() is called.
+        self.inject_audio(self._synthesize_briefing(briefing))
+
+    def _probe_briefing_voice(self) -> None:
+        """Synthesize-and-discard one word to validate the briefing voice.
+
+        generate_audio swallows a bad-voice load error (prints it and writes
+        no wav), so without this probe a typo'd voice only surfaces as a
+        runtime inject() failure — briefings silently never play."""
+        try:
+            self._synthesize_briefing("CHECK")
+        except Exception as exc:
+            raise RuntimeError(
+                f"briefing voice {self._briefing_voice!r} failed the startup "
+                "synthesis probe; check BRIEFING_VOICE against the Kokoro voice list"
+            ) from exc
+
+    def _synthesize_briefing(self, briefing: str) -> np.ndarray:
+        """TTS briefing text to 24kHz mono float32 PCM.
+
+        Kokoro synthesis consumes the global mx/python RNG streams; snapshot
+        and restore them so synthesis never perturbs the seeded generation
+        trajectory (in the spikes the briefing was synthesized outside the
+        session — this keeps the engine mechanics equivalent). Seeding inside
+        the snapshot makes the briefing audio byte-identical for a given text
+        regardless of when synthesis happens."""
         mx_state = mx.random.state[0]
         py_state = random.getstate()
         np_state = np.random.get_state()
@@ -164,7 +188,7 @@ class VoiceEngine:
             mx.random.state[0] = mx_state
             random.setstate(py_state)
             np.random.set_state(np_state)
-        self.inject_audio(pcm[0].astype(np.float32))
+        return pcm[0].astype(np.float32)
 
     def inject_audio(self, pcm_24k: np.ndarray) -> None:
         """Queue pre-rendered briefing PCM (the primitive inject() builds on)."""
