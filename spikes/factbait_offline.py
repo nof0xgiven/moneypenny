@@ -68,14 +68,10 @@ def _run_question(eng: VoiceEngine, pcm: np.ndarray) -> tuple[str, list[np.ndarr
         if text:
             text_pieces.append(text)
 
-    n_question_frames = pcm.shape[-1] // FRAME + 1
-    for i in range(n_question_frames):
-        frame = (
-            pcm[0, i * FRAME:(i + 1) * FRAME]
-            if (i + 1) * FRAME <= pcm.shape[-1]
-            else None
-        )
-        step(frame)
+    # Pass the final partial frame through too — the engine pads it
+    # (VoiceEngine._encode_pcm); dropping it would cut the question's tail.
+    for start in range(0, pcm.shape[-1], FRAME):
+        step(pcm[0, start:start + FRAME])
     for _ in range(int(FREE_RUN_SECONDS * SAMPLE_RATE / FRAME)):
         step(None)
     return "".join(text_pieces), out_frames
