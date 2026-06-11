@@ -15,7 +15,12 @@ from moneypenny.tts import BriefingSynth
 
 FRAME = 1920
 QUESTION_WAV = Path(__file__).parent / "out" / "question.wav"
-SEEDS = [2, 11, 123, 2024, 20260611]
+# The 2026-06-11 re-pin sweep ran these in two batches of five; 42424242 (the
+# old pinned seed) appears twice to confirm the new trajectory is
+# deterministic. Result: only 11 combined a normal (non-failsafe) gate open,
+# the briefed "31" spoken (hedged), and no "briefing" said aloud; 42 had
+# uptake but only via the 250-frame failsafe.
+SEEDS = [42424242, 42424242, 7, 1234, 42, 2, 11, 123, 2024, 20260611]
 
 briefing_pcm = BriefingSynth("am_michael").synthesize(
     "BRIEFING: WEATHER TODAY 31 CELSIUS CLEAR SKIES"

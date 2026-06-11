@@ -17,8 +17,10 @@ class AudioIO:
         self.speaker_frames: "queue.Queue[np.ndarray]" = queue.Queue()
         # Output underrun diagnostic: total zero-filled callbacks since start.
         # Bursts of growth while the model is mid-sentence are the direct
-        # evidence of broken (choppy) speaker output. Plain int += is atomic
-        # under the GIL; read from the status line on the loop thread.
+        # evidence of broken (choppy) speaker output. Written only by the
+        # PortAudio output-callback thread (so the += read-modify-write never
+        # races another writer); the status line on the loop thread only
+        # reads, and a momentarily stale read is fine for a diagnostic.
         self.underruns = 0
         self._in = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, blocksize=FRAME, callback=self._on_input

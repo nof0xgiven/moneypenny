@@ -46,6 +46,8 @@ Hedge timing verified by RMS energy analysis: the hedge ends ~6.7s absolute, so 
 
 **Consequences for Phase 1:** `VoiceEngine.inject()` implements TTS → user-channel audio; the forced-text-token path is deleted, not kept as an option (Task 16). Injection draining is gated on model output silence, not a fixed delay.
 
+> **Superseded detail (2026-06-11):** `VoiceEngine.inject(text)` was split into `BriefingSynth.synthesize` (tts worker, `moneypenny/tts.py`) + `VoiceEngine.inject_audio(pcm)` (engine worker) for real-time reasons — Kokoro on the engine worker stalled the frame loop (see decision 0002, known limitation 1). The mechanism decided here (TTS in a distinct voice → user-channel audio, silence-gated) is unchanged.
+
 **Open risks (tracked into Phase 1):**
 
 1. **Uptake is probabilistic** (3/4 seeds for c5) — P0.5 latency work and Task 18 live tests must observe real-world uptake.

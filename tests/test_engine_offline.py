@@ -130,9 +130,12 @@ def test_question_briefing_answer_cycle(tmp_path):
     # which shifted the RNG stream at generation start and broke the old
     # seed's fact-uptake trajectory (it spoke "clear sky day" but never the
     # temperature). Swept seeds {42424242, 7, 1234, 42, 2, 11, 123, 2024,
-    # 20260611} with spikes/seed_sweep_regression.py; 11 is the cleanest:
-    # normal gate open (waited 63 frames, not the 250-frame failsafe), clear
-    # "31" uptake, no "briefing" spoken aloud.
+    # 20260611} with spikes/seed_sweep_regression.py; 11 is the best of the
+    # sweep: normal gate open (waited 63 frames, not the 250-frame failsafe),
+    # no "briefing" spoken aloud, and the briefed temperature IS spoken — but
+    # hedged ("I don' have the temperature here, but 31 is a nice day"), the
+    # briefing-acknowledged-as-aside character pattern of decision 0001 open
+    # risk 3. The "31" assertion holds; clean unhedged delivery does not.
     briefing_pcm = BriefingSynth("am_michael").synthesize(
         "BRIEFING: WEATHER TODAY 31 CELSIUS CLEAR SKIES"
     )
