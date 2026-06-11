@@ -53,6 +53,42 @@ def test_homey_missing_action_escalates_not_crashes(host):
     assert homey.kwargs is None  # nothing executed
 
 
+def test_homey_non_string_device_escalates_not_crashes(host):
+    h, homey = host
+    out = h.execute(RouteDecision(1, "homey", {"action": "turn_on", "device": 42}, 0.9))
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_homey_non_string_action_escalates_not_crashes(host):
+    h, homey = host
+    out = h.execute(RouteDecision(1, "homey", {"action": ["turn_on"], "zone": "office"}, 0.9))
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_homey_non_string_capability_escalates_not_crashes(host):
+    h, homey = host
+    args = {"action": "set", "zone": "office", "capability": ["dim"], "value": 0.5}
+    out = h.execute(RouteDecision(1, "homey", args, 0.9))
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_homey_non_scalar_value_escalates_not_crashes(host):
+    h, homey = host
+    args = {"action": "set", "zone": "office", "capability": "dim", "value": {"level": 0.5}}
+    out = h.execute(RouteDecision(1, "homey", args, 0.9))
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_timer_weird_label_does_not_crash(host):
+    h, _ = host
+    out = h.execute(RouteDecision(1, "timer", {"duration": "2 minutes", "label": {"x": 1}}, 0.9))
+    assert "TIMER SET 2 MINUTES" in out
+
+
 async def test_timer_dispatch(host):
     h, _ = host
     out = h.execute(RouteDecision(1, "timer", {"duration": "5 minutes", "label": "tea"}, 0.9))

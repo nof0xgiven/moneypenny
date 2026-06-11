@@ -61,3 +61,48 @@ def test_garbage_input_escalates(router):
 def test_decision_parse_fallback_is_tier2():
     d = parse_decision("not json at all")
     assert d.tier == 2 and d.confidence == 0.0
+
+
+def test_parse_low_confidence_tier1_escalates():
+    d = parse_decision('{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.69}')
+    assert d.tier == 2 and d.tool is None
+
+
+def test_parse_confidence_floor_boundary_keeps_tier1():
+    d = parse_decision('{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.7}')
+    assert d.tier == 1 and d.tool == "weather"
+
+
+def test_parse_unknown_tool_tier1_escalates():
+    d = parse_decision('{"tier": 1, "tool": "calendar", "args": {}, "confidence": 0.95}')
+    assert d.tier == 2 and d.tool is None
+
+
+def test_parse_tier2_with_tool_set_nulls_tool():
+    d = parse_decision('{"tier": 2, "tool": "weather", "args": {}, "confidence": 0.9}')
+    assert d.tier == 2 and d.tool is None
+
+
+def test_parse_invalid_tier_falls_back():
+    d = parse_decision('{"tier": 5, "tool": null, "args": {}, "confidence": 0.9}')
+    assert d.tier == 2 and d.confidence == 0.0
+
+
+def test_parse_non_dict_args_falls_back():
+    d = parse_decision('{"tier": 1, "tool": "weather", "args": [1, 2], "confidence": 0.9}')
+    assert d.tier == 2 and d.confidence == 0.0
+
+
+def test_parse_multiple_json_objects_never_raises():
+    # Greedy regex spans both objects -> invalid JSON -> tier 2 fallback, no raise.
+    raw = ('{"tier": 0, "tool": null, "args": {}, "confidence": 0.9} '
+           '{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.9}')
+    d = parse_decision(raw)
+    assert d.tier == 2
+
+
+def test_parse_nan_confidence_escalates():
+    # Python's json module accepts the NaN literal; NaN < floor is False, so an
+    # unguarded comparison would keep tier 1 with NaN confidence.
+    d = parse_decision('{"tier": 1, "tool": "weather", "args": {}, "confidence": NaN}')
+    assert d.tier == 2 and d.confidence == 0.0

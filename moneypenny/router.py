@@ -10,6 +10,7 @@ its generic capability path - free text alone cannot drive it.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 
@@ -76,6 +77,9 @@ def parse_decision(raw: str) -> RouteDecision:
         tier = int(d["tier"])
         tool = d.get("tool")
         conf = float(d.get("confidence", 0.0))
+        if not math.isfinite(conf):
+            # NaN compares False against the floor and would sneak past it.
+            conf = 0.0
         args = d.get("args") or {}
         if tier not in (0, 1, 2, 3) or not isinstance(args, dict):
             return fallback

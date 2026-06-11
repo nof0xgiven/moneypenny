@@ -3,6 +3,10 @@
 Action > narration: executions happen here regardless of what the voice
 pipeline later does with the summary. Malformed args never raise - they
 produce clarification briefings (the router is an LLM; trust nothing).
+
+Weather is the exception to "never raise": network failures from
+current_weather propagate to the caller; the app layer catches them and
+converts to a failure briefing (plan Task 17).
 """
 from __future__ import annotations
 
@@ -28,14 +32,27 @@ class ToolHost:
         if decision.tool == "homey":
             args = decision.args
             action = args.get("action")
-            if not action or not (args.get("device") or args.get("zone")):
+            device = args.get("device")
+            zone = args.get("zone")
+            capability = args.get("capability")
+            value = args.get("value")
+            well_typed = (
+                isinstance(action, str)
+                and action
+                and (device is None or isinstance(device, str))
+                and (zone is None or isinstance(zone, str))
+                and (device or zone)
+                and (capability is None or isinstance(capability, str))
+                and (value is None or isinstance(value, (bool, int, float, str)))
+            )
+            if not well_typed:
                 return compose("briefing", "HOMEY COMMAND UNCLEAR ASK USER TO REPEAT")
             result = self._homey.execute(
                 action=action,
-                device=args.get("device"),
-                zone=args.get("zone"),
-                capability=args.get("capability"),
-                value=args.get("value"),
+                device=device,
+                zone=zone,
+                capability=capability,
+                value=value,
             )
             return compose("briefing", result.summary)
         if decision.tool == "timer":
