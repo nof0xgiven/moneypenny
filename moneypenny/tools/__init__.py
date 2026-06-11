@@ -5,8 +5,8 @@ pipeline later does with the summary. Malformed args never raise - they
 produce clarification briefings (the router is an LLM; trust nothing).
 
 Weather is the exception to "never raise": network failures from
-current_weather propagate to the caller; the app layer catches them and
-converts to a failure briefing (plan Task 17).
+current_weather propagate to the caller; the app layer (moneypenny.app)
+catches and converts them to failure briefings.
 """
 from __future__ import annotations
 
