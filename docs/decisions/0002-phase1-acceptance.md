@@ -254,9 +254,15 @@ the live session):
 
 ## Known limitations going into live testing
 
-1. **TTS stall:** `inject()` runs Kokoro synthesis on the engine worker — ~1–2s frame-loop
-   stall per briefing, plus a cumulative speaker-latency ratchet (each stall pushes
-   playback further behind real time; no catch-up mechanism in Phase 1).
+1. **TTS stall — RESOLVED 2026-06-11:** `inject()` originally ran Kokoro synthesis on
+   the engine worker — a ~0.4–3s frame-loop stall per briefing (measured live: 370ms
+   for the short weather briefing, with an underrun burst on the speakers while the
+   model was mid-reply), plus a cumulative speaker-latency ratchet. Briefing TTS now
+   lives in `moneypenny/tts.py` (`BriefingSynth`) on its own 1-worker pool: synthesis
+   overlaps generation and only finished PCM crosses to the engine worker via
+   `inject_audio()`; the engine sheds Kokoro entirely (`inject(text)` removed). The
+   ratchet mechanism remains for any other engine-worker stall (e.g. warm-up
+   catch-up) — the cap/drain TODO stays Phase 2.
 2. **Uptake is probabilistic** (decision 0001, open risk 1: 3/4 seeds for the c5 recipe) —
    live sessions must observe real-world uptake rate.
 3. **Pre-briefing hallucination risk** (decision 0001, open risk 2) — quantified at
@@ -337,7 +343,17 @@ the live session):
    — no re-pin of the fact-uptake trajectory was needed.
 
    Residual fps risk is now confined to USER speech (ASR adds ~47ms/frame
-   amortized while the gate is on → bounded dip, drains in silence), plus the
+   amortized while the gate is on → bounded dip, drains in silence)
+   — **largely resolved 2026-06-11:** `asr.add_frame` now runs on its own
+   1-worker pool CONCURRENTLY with `engine.step` (`asyncio.gather`), so the
+   per-frame cost is max(asr, step) ≈ step, not the sum. Measured live before:
+   asr_ms 39–52 + step_ms 67–85 sequential → fps 7.6–10.6 during speech, spkq
+   draining to 1–4, speaker underrun bursts while the model replied. After:
+   fps 11.1–12.1 during speech (asr_ms 46–52 fully hidden behind step_ms
+   65–79), spkq never below 9, zero new underruns across full
+   speech→reply→briefing cycles. The asr worker pays the non-engine-thread
+   mlx penalty for parakeet but it stays under the engine step time, so it is
+   free in wall-clock terms. Plus the
    environment notes for the live session: without headphones, speaker→mic
    feedback keeps VAD in speech indefinitely (gate stays on, catch-up
    correctly suppressed) — headphones are required as already specified; and

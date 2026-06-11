@@ -1,12 +1,15 @@
 """VoiceEngine: PersonaPlex frame loop with an injection hook.
 
 One step() per 80ms frame. Injection mechanism per docs/decisions/0001:
-audio briefings (TTS, distinct voice) on the user channel, gated on output silence.
+audio briefings (TTS, distinct voice) on the user channel, gated on output
+silence. TTS itself lives in moneypenny/tts.py (BriefingSynth) and runs on
+its own worker; this class only accepts finished PCM via inject_audio(), so
+the engine worker never stalls on synthesis.
 
 G2 invariant: this class returns model PCM; it never plays audio itself.
 
-Single-threaded by design: the app serializes all step()/inject() calls onto
-one worker; nothing here is locked. Construct and step on the SAME thread —
+Single-threaded by design: the app serializes all step()/inject_audio() calls
+onto one worker; nothing here is locked. Construct and step on the SAME thread —
 MLX streams are thread-bound, so a VoiceEngine built on one thread cannot be
 stepped on another (RuntimeError "There is no Stream(gpu, N) in current
 thread.", then SIGBUS). The app constructs this on the engine worker.
@@ -25,17 +28,11 @@ and 12.5 fps; see docs/decisions/0002 known limitation 6).
 from __future__ import annotations
 
 import concurrent.futures
-import random
-import tempfile
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 import rustymimi
 import sentencepiece
-import sphn
-from mlx_audio.tts.generate import generate_audio
-from mlx_audio.tts.utils import load_model as load_tts_model
 
 from personaplex_mlx import models, utils
 from personaplex_mlx.persona_utils import (
@@ -53,7 +50,6 @@ from personaplex_mlx.persona_utils import (
 
 FRAME = 1920
 SAMPLE_RATE = 24000
-KOKORO_MODEL = "prince-canuma/Kokoro-82M"
 
 # Injection gating (docs/decisions/0001): pending briefing PCM starts draining
 # only after the model's own output has been quiet for 2s (25 frames), with a
@@ -78,15 +74,6 @@ INJECT_AFTER_QUIET_FRAMES = 25
 INJECT_MAX_WAIT_FRAMES = 250
 OUTPUT_QUIET_RMS = 0.01
 
-# Fixed RNG seed for briefing synthesis: makes briefing audio byte-identical
-# for a given text, independent of session state at inject() time. The value
-# was selected by sweeping seeds against the offline regression scenario (the
-# briefing waveform is the only free variable in an otherwise deterministic
-# trajectory; seeds 0-1 yielded smalltalk deflection, 2 yielded clean fact
-# uptake). Uptake variance across briefing renderings is open risk 1 of
-# docs/decisions/0001 and is tracked into the live tests.
-TTS_SEED = 2
-
 # SentencePiece control ids (pad/bos/eos/unk); never part of spoken text.
 _SPECIAL_TEXT_TOKENS = (0, 1, 2, 3)
 
@@ -98,7 +85,6 @@ class VoiceEngine:
         voice: str = "NATF2",
         quantize_bits: int = 8,
         seed: int = -1,
-        briefing_voice: str = "am_michael",
     ) -> None:
         seed_all(seed)
         hf_repo = DEFAULT_HF_REPO
@@ -134,19 +120,6 @@ class VoiceEngine:
         self._mimi = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
         self._mimi_decoder = rustymimi.Tokenizer(mimi_file, num_codebooks=8)
 
-        self._briefing_voice = briefing_voice
-        # Kokoro loads eagerly: app startup loads everything anyway, the first
-        # briefing must not stall on a model load mid-call, and loading here
-        # (rather than lazily inside inject()) keeps any RNG the load consumes
-        # at a fixed, deterministic point of the seeded stream — every session
-        # behaves identically whether or not it ever injects.
-        self._kokoro = load_tts_model(model_path=KOKORO_MODEL)
-        # Fail fast on a typo'd briefing voice. The probe synthesizes inside
-        # the same RNG snapshot/restore discipline as inject(), so it cannot
-        # perturb the seeded generation trajectory regardless of where in
-        # __init__ it runs.
-        self._probe_briefing_voice()
-
         # Injection state
         self._pending_audio: np.ndarray | None = None
         self._draining = False
@@ -165,61 +138,8 @@ class VoiceEngine:
     def pending_injection(self) -> bool:
         return self._pending_audio is not None
 
-    def inject(self, briefing: str) -> None:
-        """TTS the briefing (Kokoro, distinct voice) and queue it as user-channel audio."""
-        self.inject_audio(self._synthesize_briefing(briefing))
-
-    def _probe_briefing_voice(self) -> None:
-        """Synthesize-and-discard one word to validate the briefing voice.
-
-        generate_audio swallows a bad-voice load error (prints it and writes
-        no wav), so without this probe a typo'd voice only surfaces as a
-        runtime inject() failure — briefings silently never play."""
-        try:
-            self._synthesize_briefing("CHECK")
-        except Exception as exc:
-            raise RuntimeError(
-                f"briefing voice {self._briefing_voice!r} failed the startup "
-                "synthesis probe; check BRIEFING_VOICE against the Kokoro voice list"
-            ) from exc
-
-    def _synthesize_briefing(self, briefing: str) -> np.ndarray:
-        """TTS briefing text to 24kHz mono float32 PCM.
-
-        Kokoro synthesis consumes the global mx/python RNG streams; snapshot
-        and restore them so synthesis never perturbs the seeded generation
-        trajectory (in the spikes the briefing was synthesized outside the
-        session — this keeps the engine mechanics equivalent). Seeding inside
-        the snapshot makes the briefing audio byte-identical for a given text
-        regardless of when synthesis happens."""
-        mx_state = mx.random.state[0]
-        py_state = random.getstate()
-        np_state = np.random.get_state()
-        try:
-            seed_all(TTS_SEED)
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                prefix = Path(tmp_dir) / "briefing"
-                generate_audio(
-                    text=briefing,
-                    model=self._kokoro,
-                    voice=self._briefing_voice,
-                    file_prefix=str(prefix),
-                    audio_format="wav",
-                    join_audio=True,
-                    play=False,
-                    verbose=False,
-                )
-                # Normalize to 24kHz mono float32 (Kokoro emits 24kHz, but sphn
-                # resampling makes that an invariant rather than an assumption).
-                pcm, _ = sphn.read(str(prefix.with_suffix(".wav")), sample_rate=SAMPLE_RATE)
-        finally:
-            mx.random.state[0] = mx_state
-            random.setstate(py_state)
-            np.random.set_state(np_state)
-        return pcm[0].astype(np.float32)
-
     def inject_audio(self, pcm_24k: np.ndarray) -> None:
-        """Queue pre-rendered briefing PCM (the primitive inject() builds on)."""
+        """Queue pre-rendered briefing PCM (synthesized by tts.BriefingSynth)."""
         pcm = np.asarray(pcm_24k, dtype=np.float32).reshape(-1)
         if self._pending_audio is None:
             self._pending_audio = pcm

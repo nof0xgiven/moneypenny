@@ -15,6 +15,11 @@ class AudioIO:
     def __init__(self) -> None:
         self.mic_frames: "queue.Queue[np.ndarray]" = queue.Queue()
         self.speaker_frames: "queue.Queue[np.ndarray]" = queue.Queue()
+        # Output underrun diagnostic: total zero-filled callbacks since start.
+        # Bursts of growth while the model is mid-sentence are the direct
+        # evidence of broken (choppy) speaker output. Plain int += is atomic
+        # under the GIL; read from the status line on the loop thread.
+        self.underruns = 0
         self._in = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, blocksize=FRAME, callback=self._on_input
         )
@@ -29,6 +34,7 @@ class AudioIO:
         try:
             out_data[:, 0] = self.speaker_frames.get_nowait()
         except queue.Empty:
+            self.underruns += 1
             out_data.fill(0)
 
     def __enter__(self) -> "AudioIO":

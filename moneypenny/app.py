@@ -5,21 +5,29 @@ Flow per 80ms frame:
   engine.step ; engine PCM -> speakers
   ASR runs ONLY around speech: pre-roll (320ms) flushed at speech_start,
   pair-batched frames while speaking, 640ms hangover after speech ends
-  (see asr_gate.py). Silent frames cost zero ASR work.
+  (see asr_gate.py). Silent frames cost zero ASR work. asr.add_frame runs on
+  its own worker CONCURRENTLY with engine.step (asyncio.gather): per-frame
+  cost is max(asr, step), not the sum — running them sequentially overran the
+  80ms budget during speech (asr ~40ms amortized + step ~65ms), starving the
+  speaker queue right when the model starts replying (measured: fps 7.6-10,
+  audible underruns).
   VAD maybe_end (160ms silence)  -> classify on current ASR partial (P0.1:
                                     classification starts BEFORE the confirmed end;
                                     the partial lags <=160ms from pair-batching)
   VAD utterance_end (640ms)      -> if the final transcript materially grew and
                                     nothing executed yet, re-classify on it
-  RouteDecision tier 1 -> ToolHost -> briefing -> engine.inject (on the engine worker;
-                                    the engine gates injection on output silence)
+  RouteDecision tier 1 -> ToolHost -> briefing text -> BriefingSynth (tts worker)
+                                    -> engine.inject_audio (engine worker; the
+                                    engine gates injection on output silence)
 
-Threading model: engine.step AND engine.inject run on a single engine worker
-thread (engine is single-threaded by design; inject's TTS stalls the frame loop
-~1-2s, accepted in Phase 1); router+tools run on a second worker so
-classification never stalls the frame loop. asyncio coordinates via
-run_in_executor. Worker exceptions are surfaced via done-callbacks - never
-silently swallowed (invariant #2).
+Threading model: engine.step and engine.inject_audio run on a single engine
+worker thread (engine is single-threaded by design); router+tools run on a
+second worker so classification never stalls the frame loop; ASR runs on a
+third worker, overlapped with the engine step (above); briefing TTS runs on a
+fourth (Kokoro synthesis used to run on the engine worker and stalled the
+frame loop ~0.4-3s per briefing — now only the finished PCM crosses to the
+engine worker). asyncio coordinates via run_in_executor. Worker exceptions
+are surfaced via done-callbacks - never silently swallowed (invariant #2).
 
 Thread affinity (hard requirement): MLX streams are thread-bound — each
 thread has its own stream registry, and evaluating a graph whose ops were
@@ -27,8 +35,9 @@ scheduled on another thread's stream raises "There is no Stream(gpu, N) in
 current thread." (then SIGBUS). So every MLX component is CONSTRUCTED on the
 thread that will run it: VoiceEngine on the engine worker, Router on the
 route worker (which also rebinds mlx_lm's import-time generation_stream — see
-router.py), and the ASR transcriber on the event-loop thread where add_frame
-runs. The pools therefore exist before the models load.
+router.py), the ASR transcriber on the asr worker where add_frame/finish run,
+and BriefingSynth on the tts worker. The pools therefore exist before the
+models load.
 
 Import affinity (measured hard requirement, the one sanctioned exception to
 the imports-at-top rule): the MLX stack (engine/asr/router modules) is
@@ -47,27 +56,29 @@ changes the meaning, an already-executed read-only tool (weather) is harmless;
 Homey/timer commands need the full command present in the partial to classify
 Tier 1 at all, and escalation bias pushes truncated partials to Tier 2.
 
-Known Phase 1 limitation - speaker-queue latency ratchet: each inject() TTS
-stall blocks the engine worker, then the frame loop catches up by stepping
-through the backlog faster than realtime, bursting the produced PCM into the
-unbounded speaker_frames queue. After catch-up, production and consumption
-both run at 12.5 fps again, so the queue depth gained during the stall never
-drains: every stall permanently adds its duration to mouth-to-ear latency for
-the rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
+Known Phase 1 limitation - speaker-queue latency ratchet: any engine-worker
+stall (today: the model-load warm-up; formerly each inject() TTS) blocks
+stepping, then the frame loop catches up by stepping through the backlog
+faster than realtime, bursting the produced PCM into the unbounded
+speaker_frames queue. After catch-up, production and consumption both run at
+12.5 fps again, so the queue depth gained during the stall never drains:
+every stall permanently adds its duration to mouth-to-ear latency for the
+rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
 
-Drift protection (bounded catch-up): asr.add_frame still runs on the frame-
-loop thread, but only while the gate is on; if the frame loop nonetheless
-falls >CATCHUP_TRIGGER_FRAMES behind real time DURING SILENCE, the oldest
+Drift protection (bounded catch-up): if the frame loop falls
+>CATCHUP_TRIGGER_FRAMES behind real time DURING SILENCE, the oldest
 room-tone frames are dropped down to CATCHUP_TARGET_FRAMES (single warning
 logged). Frames are never dropped while in speech or ASR hangover - dropping
 mid-utterance would corrupt the transcript; dropping silence just loses room
-tone. Residual risk: fps can still dip below 12.5 during speech (ASR on),
-but the dip is bounded and the queue drains in the following silence.
+tone. Residual risk: fps can still dip below 12.5 during speech if the ASR
+call exceeds the step time (per-frame cost is max(asr, step) since the two
+overlap), but the dip is bounded and the queue drains in the following
+silence.
 Step budget (see decision 0002 known-limitation 6): the original ~183-213ms
 idle step was the import-affinity penalty (fixed here via deferred imports)
 plus synchronous mimi decode (fixed in engine.py via the one-frame decode
 pipeline); idle step is now ~70ms, inside the 80ms budget, so catch-up only
-fires after genuine stalls (inject TTS) rather than perpetually.
+fires after genuine stalls (model-load warm-up) rather than perpetually.
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real
@@ -112,7 +123,6 @@ def _load_engine(cfg: Config):
         system_prompt=FRONT_OF_HOUSE,
         voice=cfg.voice,
         quantize_bits=cfg.quantize_bits,
-        briefing_voice=cfg.briefing_voice,
     )
 
 
@@ -124,11 +134,18 @@ def _load_router(cfg: Config):
 
 
 def _load_asr(cfg: Config):
-    """Runs on the event-loop thread, where add_frame runs (after the engine
+    """Runs on the asr worker, where add_frame/finish run (after the engine
     worker has already claimed the first mlx import)."""
     from moneypenny.asr import StreamingTranscriber
 
     return StreamingTranscriber(model_id=cfg.asr_model)
+
+
+def _load_tts(cfg: Config):
+    """Runs on the tts worker, where synthesize runs."""
+    from moneypenny.tts import BriefingSynth
+
+    return BriefingSynth(voice=cfg.briefing_voice)
 
 STATUS_EVERY_FRAMES = 25  # ~2s of audio at 12.5 fps
 CATCHUP_TRIGGER_FRAMES = 60  # ~5s behind real time: start dropping silence
@@ -179,13 +196,16 @@ async def main() -> None:
     # will run them (streams are thread-bound; see module docstring).
     engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
     route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
+    asr_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
+    tts_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
 
-    log.info("loading models (engine, router, asr)...")
+    log.info("loading models (engine, router, asr, tts)...")
     # Engine FIRST: its worker must win the first-mlx-import race (import
-    # affinity, module docstring) before the route pool or loop thread touch mlx.
+    # affinity, module docstring) before the other pools touch mlx.
     engine = await loop.run_in_executor(engine_pool, _load_engine, cfg)
     router = await loop.run_in_executor(route_pool, _load_router, cfg)
-    asr = _load_asr(cfg)  # loop thread: add_frame runs here
+    asr = await loop.run_in_executor(asr_pool, _load_asr, cfg)
+    synth = await loop.run_in_executor(tts_pool, _load_tts, cfg)
     vad = EnergyVAD(rms_threshold=cfg.vad_rms_threshold)
     gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
     injections = InjectionQueue()
@@ -240,6 +260,44 @@ async def main() -> None:
             lambda f: f.exception() and log.error("route worker error: %r", f.exception())
         )
 
+    # --- timed worker wrappers (timings feed the status line) ---
+
+    def _asr_timed(buf: np.ndarray) -> tuple[str, float]:
+        """Runs on the asr worker."""
+        t0 = time.perf_counter()
+        return asr.add_frame(buf), time.perf_counter() - t0
+
+    def _step_timed(mic_frame: np.ndarray) -> tuple[tuple[np.ndarray | None, str], float]:
+        """Runs on the engine worker."""
+        t0 = time.perf_counter()
+        return engine.step(mic_frame), time.perf_counter() - t0
+
+    def _finish_and_reset() -> str:
+        """Runs on the asr worker: ALL transcriber calls stay on that one
+        thread (thread affinity, module docstring)."""
+        final = asr.finish()
+        asr.reset()
+        return final
+
+    def _synthesize_timed(text: str) -> tuple[np.ndarray, float]:
+        """Runs on the tts worker."""
+        t0 = time.perf_counter()
+        return synth.synthesize(text), time.perf_counter() - t0
+
+    def _inject_synthesized(f: "asyncio.Future") -> None:
+        """Loop-thread done-callback: hand finished briefing PCM to the engine
+        worker. Failures become log lines, never silent."""
+        if f.exception():
+            log.error("briefing tts error: %r", f.exception())
+            return
+        pcm, dur = f.result()
+        log.info("briefing synthesized in %.0fms (%.1fs of audio); queueing inject",
+                 dur * 1000, pcm.shape[-1] / Config.SAMPLE_RATE)
+        inj_fut = loop.run_in_executor(engine_pool, engine.inject_audio, pcm)
+        inj_fut.add_done_callback(
+            lambda g: g.exception() and log.error("inject error: %r", g.exception())
+        )
+
     log.info("audio defaults: device=%s input=%s output=%s",
              sd.default.device, _describe_device("input"), _describe_device("output"))
 
@@ -281,12 +339,31 @@ async def main() -> None:
             # at all this frame; gated-off frames cost zero ASR work (P0.1
             # transcript tap now only runs around speech).
             event = vad.feed(mic)
-            t0 = time.perf_counter()
             asr_buf = gate.feed(mic, event, vad.in_speech)
-            if asr_buf is not None:
-                partial = asr.add_frame(asr_buf)
-            win_asr_s += time.perf_counter() - t0
 
+            # drain injections: briefing text -> TTS on the tts worker ->
+            # finished PCM -> engine.inject_audio on the engine worker. The
+            # frame loop never blocks on synthesis.
+            briefing = injections.get()
+            if briefing is not None:
+                synth_fut = loop.run_in_executor(tts_pool, _synthesize_timed, briefing)
+                synth_fut.add_done_callback(_inject_synthesized)
+
+            # ASR (if gated on) and the model step run CONCURRENTLY on their
+            # workers: per-frame cost is max(asr, step), not the sum.
+            step_fut = loop.run_in_executor(engine_pool, _step_timed, mic)
+            if asr_buf is not None:
+                (partial, asr_s), ((audio_out, text), step_s) = await asyncio.gather(
+                    loop.run_in_executor(asr_pool, _asr_timed, asr_buf), step_fut
+                )
+                win_asr_s += asr_s
+            else:
+                (audio_out, text), step_s = await step_fut
+            win_step_s += step_s
+
+            # VAD events are handled AFTER the gather so maybe_end classifies
+            # on the freshest partial (it arrives one gather later than the
+            # pre-overlap design, <=80ms).
             if event:
                 log.info("vad %s partial=%r", event, partial)
             if event == "speech_start":
@@ -295,28 +372,14 @@ async def main() -> None:
                 # classify on the partial BEFORE the utterance is confirmed over
                 submit_classification(partial, time.perf_counter())
             elif event == "utterance_end":
-                # the gate force-flushed its buffered frame above, so finish()
-                # sees the full hangover tail
-                final = asr.finish()
-                asr.reset()
+                # the gate force-flushed its buffered frame into this frame's
+                # add_frame (just awaited), so finish() sees the full hangover tail
+                final = await loop.run_in_executor(asr_pool, _finish_and_reset)
                 grew = final.strip() and final.strip() != (utt.classified_text or "").strip()
                 if grew and utt.executed_gen != utt.gen:
                     submit_classification(final, time.perf_counter())
                 partial = ""
 
-            # drain injections into the engine (inject runs on the engine worker;
-            # TTS there stalls the frame loop briefly - accepted phase 1 cost)
-            briefing = injections.get()
-            if briefing is not None:
-                inj_fut = loop.run_in_executor(engine_pool, engine.inject, briefing)
-                inj_fut.add_done_callback(
-                    lambda f: f.exception() and log.error("inject error: %r", f.exception())
-                )
-
-            # one model step, off the event loop thread
-            t0 = time.perf_counter()
-            audio_out, text = await loop.run_in_executor(engine_pool, engine.step, mic)
-            win_step_s += time.perf_counter() - t0
             if audio_out is not None:
                 audio.speaker_frames.put_nowait(audio_out)
             if text:
@@ -326,9 +389,10 @@ async def main() -> None:
             if win_frames >= STATUS_EVERY_FRAMES:
                 elapsed = time.perf_counter() - win_start
                 log.info(
-                    "status: micq=%d spkq=%d micRMS=%.6f vad=%s asr_on=%s asr_len=%d "
-                    "fps=%.1f asr_ms=%.0f step_ms=%.0f",
+                    "status: micq=%d spkq=%d underruns=%d micRMS=%.6f vad=%s asr_on=%s "
+                    "asr_len=%d fps=%.1f asr_ms=%.0f step_ms=%.0f",
                     audio.mic_frames.qsize(), audio.speaker_frames.qsize(),
+                    audio.underruns,
                     win_max_rms, vad.in_speech, gate.active, len(partial),
                     win_frames / elapsed if elapsed > 0 else 0.0,
                     win_asr_s / win_frames * 1000, win_step_s / win_frames * 1000,

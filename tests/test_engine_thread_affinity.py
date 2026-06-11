@@ -9,9 +9,10 @@ thread.") and can SIGBUS the whole process.
 """
 import concurrent.futures
 
+import numpy as np
 import pytest
 
-from moneypenny.engine import VoiceEngine
+from moneypenny.engine import FRAME, VoiceEngine
 from moneypenny.prompts import FRONT_OF_HOUSE
 
 
@@ -32,11 +33,14 @@ def test_engine_constructed_and_stepped_on_same_worker_thread():
                 if audio_out is not None:
                     out_frames.append(audio_out)
 
-        # ~2s of frame loop, then a briefing injection (TTS on the worker,
-        # like app.py), then a few more frames: covers every engine entry
-        # point the app exercises across a thread boundary.
+        # ~2s of frame loop, then a briefing PCM injection (inject_audio on
+        # the worker, like app.py; TTS itself lives off the engine now), then
+        # a few more frames: covers every engine entry point the app
+        # exercises across a thread boundary.
         step_on_worker(25)
-        pool.submit(engine.inject, "BRIEFING: TEST").result()
+        pool.submit(
+            engine.inject_audio, np.zeros(FRAME * 2, dtype=np.float32)
+        ).result()
         step_on_worker(5)
 
         assert out_frames, "engine produced no audio frames across 30 steps"
