@@ -54,6 +54,16 @@ def test_voice_defaults_when_unset(monkeypatch):
     assert cfg.briefing_voice == "am_michael"
 
 
+def test_vad_rms_threshold_env_var(monkeypatch):
+    monkeypatch.setenv("VAD_RMS_THRESHOLD", "0.025")
+    assert Config.from_env().vad_rms_threshold == pytest.approx(0.025)
+
+
+def test_vad_rms_threshold_default(monkeypatch):
+    monkeypatch.delenv("VAD_RMS_THRESHOLD", raising=False)
+    assert Config.from_env().vad_rms_threshold == pytest.approx(0.01)
+
+
 def test_frame_constants():
     # protocol invariants (1920 samples = one 80ms Mimi step @ 24kHz), not tunables
     assert Config.SAMPLE_RATE == 24000

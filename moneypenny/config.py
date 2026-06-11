@@ -21,6 +21,10 @@ class Config:
     voice: str = "NATF2"
     briefing_voice: str = "am_michael"
     quantize_bits: int = 8
+    # Energy-VAD speech threshold (frame RMS). Room/mic dependent: must sit
+    # above the ambient noise floor or the VAD never leaves "speech" (boundary
+    # events stop firing and the ASR gate never closes).
+    vad_rms_threshold: float = 0.01
 
     @property
     def homey_configured(self) -> bool:
@@ -42,4 +46,5 @@ class Config:
             weather_lon=float(os.environ.get("WEATHER_LON", "55.2708")),
             voice=os.environ.get("MONEYPENNY_VOICE", "NATF2"),
             briefing_voice=os.environ.get("BRIEFING_VOICE", "am_michael"),
+            vad_rms_threshold=float(os.environ.get("VAD_RMS_THRESHOLD", "0.01")),
         )

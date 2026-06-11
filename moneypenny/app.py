@@ -1,9 +1,14 @@
 """Moneypenny main loop: the only file that touches real devices.
 
 Flow per 80ms frame:
-  mic -> [VAD, ASR, engine.step] ; engine PCM -> speakers
+  mic -> VAD (cheap RMS, every frame) -> AsrGate -> [ASR if gated on] ->
+  engine.step ; engine PCM -> speakers
+  ASR runs ONLY around speech: pre-roll (320ms) flushed at speech_start,
+  pair-batched frames while speaking, 640ms hangover after speech ends
+  (see asr_gate.py). Silent frames cost zero ASR work.
   VAD maybe_end (160ms silence)  -> classify on current ASR partial (P0.1:
-                                    classification starts BEFORE the confirmed end)
+                                    classification starts BEFORE the confirmed end;
+                                    the partial lags <=160ms from pair-batching)
   VAD utterance_end (640ms)      -> if the final transcript materially grew and
                                     nothing executed yet, re-classify on it
   RouteDecision tier 1 -> ToolHost -> briefing -> engine.inject (on the engine worker;
@@ -38,11 +43,19 @@ both run at 12.5 fps again, so the queue depth gained during the stall never
 drains: every stall permanently adds its duration to mouth-to-ear latency for
 the rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
 
-Known Phase 1 limitation - per-frame ASR on the event-loop thread:
-asr.add_frame runs inference on the frame-loop (event-loop) thread each 80ms
-frame. If asr + vad + the awaited engine.step ever exceed the 80ms frame
-budget, the unbounded mic_frames queue grows without backpressure - watch
-queue depth during the live session.
+Drift protection (bounded catch-up): asr.add_frame still runs on the frame-
+loop thread, but only while the gate is on; if the frame loop nonetheless
+falls >CATCHUP_TRIGGER_FRAMES behind real time DURING SILENCE, the oldest
+room-tone frames are dropped down to CATCHUP_TARGET_FRAMES (single warning
+logged). Frames are never dropped while in speech or ASR hangover - dropping
+mid-utterance would corrupt the transcript; dropping silence just loses room
+tone. Residual risk: fps can still dip below 12.5 during speech (ASR on),
+but the dip is bounded and the queue drains in the following silence.
+Measured caveat (see decision 0002 known-limitation 6): on current hardware
+engine.step alone runs ~183-213ms at idle (> the 80ms budget), so catch-up
+fires periodically rather than once - and a speech onset arriving while the
+loop is behind can be dropped unseen. Model-level work (e.g. 4-bit engine
+quant) is the fix; out of scope for the gating change.
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real
@@ -63,6 +76,7 @@ import sounddevice as sd
 from dotenv import load_dotenv
 
 from moneypenny.asr import StreamingTranscriber
+from moneypenny.asr_gate import AsrGate
 from moneypenny.audio import AudioIO
 from moneypenny.briefing import compose
 from moneypenny.config import Config
@@ -78,6 +92,8 @@ from moneypenny.vad import EnergyVAD
 log = logging.getLogger("moneypenny")
 
 STATUS_EVERY_FRAMES = 25  # ~2s of audio at 12.5 fps
+CATCHUP_TRIGGER_FRAMES = 60  # ~5s behind real time: start dropping silence
+CATCHUP_TARGET_FRAMES = 12   # ~1s of backlog kept after a catch-up drain
 
 
 def _describe_device(kind: str) -> str:
@@ -134,7 +150,8 @@ async def main() -> None:
     )
     router = await loop.run_in_executor(route_pool, lambda: Router(model_id=cfg.router_model))
     asr = StreamingTranscriber(model_id=cfg.asr_model)  # loop thread: add_frame runs here
-    vad = EnergyVAD()
+    vad = EnergyVAD(rms_threshold=cfg.vad_rms_threshold)
+    gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
     injections = InjectionQueue()
     timers = TimerService(
         on_fire=lambda label: injections.put(compose("briefing", f"TIMER DONE {label.upper()}")),
@@ -197,6 +214,8 @@ async def main() -> None:
     win_asr_s = 0.0
     win_step_s = 0.0
 
+    partial = ""
+
     with AudioIO() as audio:
         log.info("session live - speak")
         while True:
@@ -206,13 +225,31 @@ async def main() -> None:
                 await asyncio.sleep(0.002)
                 continue
 
+            # bounded catch-up: only during silence (gate off) - dropping
+            # mid-utterance corrupts the transcript; dropped silence is just
+            # room tone the engine never misses.
+            if audio.mic_frames.qsize() > CATCHUP_TRIGGER_FRAMES and not gate.active:
+                dropped = 0
+                while audio.mic_frames.qsize() > CATCHUP_TARGET_FRAMES:
+                    try:
+                        audio.mic_frames.get_nowait()
+                    except queue.Empty:
+                        break
+                    dropped += 1
+                log.warning("catch-up: dropped %d silent mic frames (~%.1fs of drift)",
+                            dropped, dropped * 0.08)
+
             win_max_rms = max(win_max_rms, float(np.sqrt(np.mean(mic ** 2))))
 
-            # parallel transcript tap (P0.1)
-            t0 = time.perf_counter()
-            partial = asr.add_frame(mic)
-            win_asr_s += time.perf_counter() - t0
+            # VAD first (cheap RMS), then the gate decides whether ASR runs
+            # at all this frame; gated-off frames cost zero ASR work (P0.1
+            # transcript tap now only runs around speech).
             event = vad.feed(mic)
+            t0 = time.perf_counter()
+            asr_buf = gate.feed(mic, event, vad.in_speech)
+            if asr_buf is not None:
+                partial = asr.add_frame(asr_buf)
+            win_asr_s += time.perf_counter() - t0
 
             if event:
                 log.info("vad %s partial=%r", event, partial)
@@ -222,11 +259,14 @@ async def main() -> None:
                 # classify on the partial BEFORE the utterance is confirmed over
                 submit_classification(partial, time.perf_counter())
             elif event == "utterance_end":
+                # the gate force-flushed its buffered frame above, so finish()
+                # sees the full hangover tail
                 final = asr.finish()
                 asr.reset()
                 grew = final.strip() and final.strip() != (utt.classified_text or "").strip()
                 if grew and utt.executed_gen != utt.gen:
                     submit_classification(final, time.perf_counter())
+                partial = ""
 
             # drain injections into the engine (inject runs on the engine worker;
             # TTS there stalls the frame loop briefly - accepted phase 1 cost)
@@ -250,10 +290,10 @@ async def main() -> None:
             if win_frames >= STATUS_EVERY_FRAMES:
                 elapsed = time.perf_counter() - win_start
                 log.info(
-                    "status: micq=%d spkq=%d micRMS=%.6f vad=%s asr_len=%d "
+                    "status: micq=%d spkq=%d micRMS=%.6f vad=%s asr_on=%s asr_len=%d "
                     "fps=%.1f asr_ms=%.0f step_ms=%.0f",
                     audio.mic_frames.qsize(), audio.speaker_frames.qsize(),
-                    win_max_rms, vad.in_speech, len(partial),
+                    win_max_rms, vad.in_speech, gate.active, len(partial),
                     win_frames / elapsed if elapsed > 0 else 0.0,
                     win_asr_s / win_frames * 1000, win_step_s / win_frames * 1000,
                 )

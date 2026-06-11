@@ -273,10 +273,34 @@ the live session):
 5. **Interpreter-shutdown SIGBUS** after `VoiceEngine` teardown (exit 138 post-summary
    in the slow suite and the fact-bait harness) — cosmetic for local runs, matters for
    exit-code-gated CI.
-6. **Per-frame ASR on the event-loop thread:** `asr.add_frame` runs inference on the
-   frame-loop thread every 80ms frame; if asr + vad + engine.step ever exceed the 80ms
-   frame budget, the unbounded mic queue grows without backpressure — watch queue depth
-   during the live session.
+6. **VAD-gated ASR + bounded catch-up (replaces the per-frame-ASR limitation):**
+   per-frame ASR starved the frame loop measured live (fps 2.6–3.7, mic queue
+   674→899 over 25s — ~4× behind real time). Redesigned: VAD runs first every
+   frame (cheap RMS); ASR runs ONLY around speech via `AsrGate` (`asr_gate.py`,
+   unit-tested) — a 4-frame (320ms) pre-roll ring buffer is flushed at
+   `speech_start` so word onsets aren't clipped, frames are batched in pairs
+   while speaking (halves parakeet encoder passes; partial lags ≤160ms, within
+   P0.1's <200ms), and feeding continues through the 640ms hangover (= the VAD
+   hard boundary) so trailing words land before `utterance_end`'s `finish()`.
+   Silent frames cost zero ASR work. Drift is bounded: if the mic queue exceeds
+   60 frames (~5s) while the gate is OFF, the oldest silence frames are dropped
+   down to 12 with a warning; frames are never dropped during speech or
+   hangover. Status line now reports `asr_on`. Sandbox smoke confirmed the gate
+   (`asr_on=False asr_ms=0` at idle, micq oscillating 14–62, never monotonic).
+   **Measured go/no-go finding:** with ASR fully gated off, `step_ms≈183–213`
+   at idle — `engine.step` ALONE exceeds the 80ms frame budget on this hardware
+   (current `quantize_bits=8`), capping the loop at ~5.0–5.5 fps instead of
+   12.5. Consequences: (a) catch-up fires repeatedly (~every 6.5s, ~50 frames)
+   rather than once after warm-up — drift is bounded but permanent; (b) because
+   dropped frames are never seen by the VAD, a perpetually-behind loop can drop
+   a speech ONSET that arrives during backlog (observed in the smoke). Fixing
+   this is model-level work (e.g. 4-bit engine quantization), out of scope here.
+   Two environment notes for the live session: without headphones, speaker→mic
+   feedback keeps VAD in speech indefinitely (gate stays on, catch-up correctly
+   suppressed) — headphones are required as already specified; and the energy-
+   VAD threshold must sit above the room's noise floor (this room measured
+   ~0.013–0.019 RMS ambient vs the 0.01 default) — now tunable via
+   `VAD_RMS_THRESHOLD` (smoke used 0.03).
 7. **Briefing drain vs. live mic:** while a briefing drains, the model hears the
    briefing audio but ASR/VAD still hear the real mic — user speech during a drain can
    queue a second briefing the model has no conversational antecedent for. Phase 2
