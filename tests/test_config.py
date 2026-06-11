@@ -13,10 +13,9 @@ def test_loads_from_env(monkeypatch):
     assert cfg.weather_lat == pytest.approx(25.1)
 
 
-def test_missing_required_raises(monkeypatch, tmp_path):
+def test_missing_required_raises(monkeypatch):
     monkeypatch.delenv("HOMEY_BASE_URL", raising=False)
     monkeypatch.delenv("HOMEY_API_KEY", raising=False)
-    monkeypatch.chdir(tmp_path)  # keep load_dotenv() from re-injecting workspace .env
     with pytest.raises(ValueError, match="HOMEY_BASE_URL"):
         Config.from_env()
 

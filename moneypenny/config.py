@@ -5,8 +5,6 @@ import os
 from dataclasses import dataclass
 from typing import ClassVar
 
-from dotenv import load_dotenv
-
 
 @dataclass(frozen=True)
 class Config:
@@ -25,7 +23,11 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        load_dotenv()
+        """Build a Config from os.environ (pure read, no .env loading).
+
+        The app entry point (app.main) is responsible for calling
+        dotenv.load_dotenv() before invoking this.
+        """
         missing = [k for k in ("HOMEY_BASE_URL", "HOMEY_API_KEY") if not os.environ.get(k)]
         if missing:
             raise ValueError(f"missing required env: {', '.join(missing)}")
