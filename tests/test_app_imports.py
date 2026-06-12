@@ -20,21 +20,32 @@ FORBIDDEN_PREFIXES = ("mlx", "rustymimi", "mlx_lm", "mlx_audio", "parakeet_mlx",
 
 _PROBE = """
 import sys
-import moneypenny.app
+import %%s
 bad = sorted({m.split(".")[0] for m in sys.modules if m.split(".")[0] in %r})
 print("LOADED:" + ",".join(bad))
 """ % (FORBIDDEN_PREFIXES,)
 
 
-def test_importing_app_does_not_import_mlx_stack():
+def _assert_no_mlx_on_import(module: str) -> None:
     # Subprocess: a clean interpreter is the only honest sys.modules check.
     out = subprocess.run(
-        [sys.executable, "-c", _PROBE], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", _PROBE % module],
+        capture_output=True, text=True, timeout=120,
     )
     assert out.returncode == 0, out.stderr
     loaded = out.stdout.strip().removeprefix("LOADED:")
     assert loaded == "", (
-        f"moneypenny.app transitively imported {loaded} at module level; "
+        f"{module} transitively imported {loaded} at module level; "
         "model modules must be imported on the engine worker (perf fix, "
         "docs/decisions/0002 known limitation 6)"
     )
+
+
+def test_importing_app_does_not_import_mlx_stack():
+    _assert_no_mlx_on_import("moneypenny.app")
+
+
+def test_importing_web_does_not_import_mlx_stack():
+    # The web server imports moneypenny.app (for Session) and must inherit
+    # the same guarantee: moneypenny-web loads models on the engine worker.
+    _assert_no_mlx_on_import("moneypenny.web")
