@@ -303,11 +303,24 @@ class Session:
             log.info("audio defaults: device=%s input=%s output=%s",
                      sd.default.device, _describe_device("input"), _describe_device("output"))
             self._audio = AudioIO().__enter__()
-            self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
-            # Surface frame-loop crashes even when nobody awaits the task (the web
-            # server path) - never silently swallowed (invariant #2).
-            self._loop_task.add_done_callback(self._on_frame_loop_done)
-            self.bus.emit("session", state="live")
+            try:
+                self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
+                # Surface frame-loop crashes even when nobody awaits the task (the web
+                # server path) - never silently swallowed (invariant #2).
+                self._loop_task.add_done_callback(self._on_frame_loop_done)
+                self.bus.emit("session", state="live")
+            except BaseException:
+                # Anything failing after the streams opened (task spawn, emit,
+                # or a KeyboardInterrupt landing mid-block) must not leak open
+                # PortAudio streams: close them and clear the state so a retry
+                # start() begins clean. The lifecycle lock is still held, so no
+                # stop() can race this teardown.
+                if self._loop_task is not None:
+                    self._loop_task.cancel()
+                    self._loop_task = None
+                self._audio.__exit__(None, None, None)
+                self._audio = None
+                raise
 
     async def stop(self) -> None:
         """Tear down the live conversation. Idempotent, serialized by the

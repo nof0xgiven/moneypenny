@@ -16,7 +16,10 @@ dependencies = [
     "numpy",
     "scipy",
     "python-dotenv",
-    "aiohttp>=3.11",
+    # >=3.14.1: GHSA-xcgm-r5h9-7989 (websocket frame memory-limit bypass,
+    # fixed 3.14.1) plus the 3.13.3/3.13.4 DoS + CRLF fixes. The dashboard
+    # binds 127.0.0.1 only, but it does serve websockets.
+    "aiohttp>=3.14.1",
 ]
 
 [project.optional-dependencies]

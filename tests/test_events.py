@@ -3,6 +3,8 @@ import asyncio
 import threading
 import time
 
+import pytest
+
 from moneypenny.events import EventBus
 
 
@@ -56,6 +58,17 @@ async def test_overflow_drops_oldest_keeps_newest():
     # oldest dropped, newest kept, order preserved
     assert got == [6, 7, 8, 9]
     assert q.dropped == 6
+
+
+async def test_subscribe_rejects_unbounded_queue():
+    """maxsize=0 means UNBOUNDED for asyncio.Queue, defeating the drop-oldest
+    overflow guard — must raise even under python -O (so not an assert)."""
+    bus = EventBus(asyncio.get_running_loop())
+    with pytest.raises(ValueError, match="bounded"):
+        bus.subscribe(maxsize=0)
+    with pytest.raises(ValueError, match="bounded"):
+        bus.subscribe(maxsize=-1)
+    assert bus._subscribers == []  # nothing registered on the failed calls
 
 
 async def test_last_returns_latest_per_type():

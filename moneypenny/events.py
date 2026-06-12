@@ -69,8 +69,10 @@ class EventBus:
 
     def subscribe(self, maxsize: int = DEFAULT_MAXSIZE) -> SubscriberQueue:
         """Loop-thread only. maxsize must be positive: 0 would mean an
-        UNBOUNDED asyncio.Queue, defeating the drop-oldest overflow guard."""
-        assert maxsize > 0, "subscriber queues must be bounded (maxsize > 0)"
+        UNBOUNDED asyncio.Queue, defeating the drop-oldest overflow guard.
+        A real raise (not assert): asserts are stripped under python -O."""
+        if maxsize <= 0:
+            raise ValueError("subscriber queues must be bounded (maxsize > 0)")
         q = SubscriberQueue(maxsize=maxsize)
         self._subscribers.append(q)
         return q
