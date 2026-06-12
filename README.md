@@ -64,6 +64,14 @@ status: micq=0 spkq=13 underruns=154 micRMS=0.015 vad=False asr_on=False fps=12.
 
 Healthy idle: `fps=12.5`, `asr_on=False`, `micq=0`, `underruns` flat after warm-up. ASR runs on its own worker while you speak, briefing TTS runs on another, and the engine never waits for either.
 
+## Web UI
+
+`moneypenny-web` serves a dashboard at http://127.0.0.1:8765 (localhost only, no auth). Models load at startup, same as the CLI. Start/End in the browser controls the conversation; the wave shows the mic (gold) and model (teal) channels, and the activity feed shows live transcripts, route tiers, tool runs, and briefings. Set `MONEYPENNY_WEB_PORT` to change the port. The headless `moneypenny` CLI still works as before.
+
+```bash
+.venv/bin/moneypenny-web
+```
+
 ## Voices
 
 Two voices, two audiences, set by environment variable:
