@@ -1,6 +1,6 @@
 """Web server: serves the dashboard and bridges the EventBus over WebSocket.
 
-GET /    -> moneypenny/static/index.html (the dashboard, Task 3)
+GET /    -> moneypenny/static/index.html (the dashboard)
 GET /ws  -> on connect, replay the last `session` and `status` events, then
             stream every bus event as JSON until disconnect. Incoming
             {"cmd": "start"|"stop"} drives the Session; every command is
