@@ -22,6 +22,25 @@ TIER0_OR_2_CASES = [
     "research flight prices to tokyo and email me",  # tier 3 territory; 2 or 3 both fine
 ]
 
+# Production misroutes (live session 2026-06-12): "Yeah." classified tier 3 at
+# 0.9 confidence (a background job for a backchannel!); these must be tier 0
+# exactly - escalating a contentless acknowledgement buys nothing and tier 3
+# would spawn work.
+BACKCHANNEL_CASES = [
+    "yeah",
+    "uh huh",
+    "okay cool",
+    "yeah that's right",
+]
+
+# Same session: ASR garbled the weather question and the router sent it to
+# tier 0, so the weather tool never fired and the model claimed it couldn't
+# check. Disfluent-but-recognizable weather asks must still hit the tool.
+GARBLED_WEATHER_CASES = [
+    "uh I just wondered what the weather is",
+    "what's the uh weather like out",
+]
+
 
 @pytest.fixture(scope="module")
 def router():
@@ -58,6 +77,21 @@ def test_never_guesses_tier1(router, utterance):
 def test_garbage_input_escalates(router):
     d = router.classify("uh the thing with the the")
     assert d.tier in (0, 2)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("utterance", BACKCHANNEL_CASES)
+def test_backchannel_is_tier0(router, utterance):
+    d = router.classify(utterance)
+    assert d.tier == 0
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("utterance", GARBLED_WEATHER_CASES)
+def test_garbled_weather_still_routes_to_tool(router, utterance):
+    d = router.classify(utterance)
+    assert d.tier == 1
+    assert d.tool == "weather"
 
 
 def test_decision_parse_fallback_is_tier2():

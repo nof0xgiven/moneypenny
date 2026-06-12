@@ -57,11 +57,12 @@ Homey/timer commands need the full command present in the partial to classify
 Tier 1 at all, and escalation bias pushes truncated partials to Tier 2.
 
 Known Phase 1 limitation - speaker-queue latency ratchet: any engine-worker
-stall (today: the model-load warm-up; formerly each inject() TTS) blocks
-stepping, then the frame loop catches up by stepping through the backlog
-faster than realtime, bursting the produced PCM into the unbounded
-speaker_frames queue. After catch-up, production and consumption both run at
-12.5 fps again, so the queue depth gained during the stall never drains:
+stall (formerly each inject() TTS, and the cold first steps after model load -
+now paid in load()'s warm-up before any frames flow) blocks stepping, then
+the frame loop catches up by stepping through the backlog faster than
+realtime, bursting the produced PCM into the unbounded speaker_frames queue.
+After catch-up, production and consumption both run at 12.5 fps again, so the
+queue depth gained during the stall never drains:
 every stall permanently adds its duration to mouth-to-ear latency for the
 rest of the session. TODO(phase2): cap/drain speaker_frames on catch-up.
 
@@ -78,7 +79,8 @@ Step budget (see decision 0002 known-limitation 6): the original ~183-213ms
 idle step was the import-affinity penalty (fixed here via deferred imports)
 plus synchronous mimi decode (fixed in engine.py via the one-frame decode
 pipeline); idle step is now ~70ms, inside the 80ms budget, so catch-up only
-fires after genuine stalls (model-load warm-up) rather than perpetually.
+fires after genuine stalls rather than perpetually (cold-start kernel
+compilation, formerly the big one, now runs inside load()'s warm-up).
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real
@@ -125,6 +127,28 @@ def _load_engine(cfg: Config):
         voice=cfg.voice,
         quantize_bits=cfg.quantize_bits,
     )
+
+
+ENGINE_WARMUP_STEPS = 25  # ~2s of throwaway frames: covers Metal kernel compilation
+
+
+def _warm_up_engine(engine) -> tuple[float, float]:
+    """Runs on the engine worker (thread affinity): step the cold engine so
+    Metal kernel compilation is paid HERE, in load(), not in the first live
+    seconds of a session (measured live: first steps ~630ms -> fps 1.5 -> 13s
+    of mic drift dropped by catch-up and a choppy greeting). The warm-up
+    generates throwaway model output (sine-silence in, PCM out, discarded);
+    reset_session() then re-primes the conversation state exactly as stop()
+    does - kernels stay compiled. Returns (first_step_s, last_step_s)."""
+    first_s = last_s = 0.0
+    for i in range(ENGINE_WARMUP_STEPS):
+        t0 = time.perf_counter()
+        engine.step(None)
+        last_s = time.perf_counter() - t0
+        if i == 0:
+            first_s = last_s
+    engine.reset_session()
+    return first_s, last_s
 
 
 def _load_router(cfg: Config):
@@ -240,13 +264,24 @@ class Session:
         return self._loop_task is not None and not self._loop_task.done()
 
     async def load(self) -> None:
-        """Load all models onto their worker threads. Call once."""
+        """Load all models onto their worker threads and warm the engine up.
+        Call once."""
         loop = asyncio.get_running_loop()
         self.bus.emit("session", state="loading")
         log.info("loading models (engine, router, asr, tts)...")
         # Engine FIRST: its worker must win the first-mlx-import race (import
         # affinity, module docstring) before the other pools touch mlx.
         self.engine = await loop.run_in_executor(self.engine_pool, _load_engine, self.cfg)
+        # Warm up immediately, while no other pool touches MLX: cold-start
+        # kernel compilation lands here instead of dragging the first live
+        # seconds to fps 1.5 (see _warm_up_engine). Loading state on the bus
+        # already covers this phase.
+        log.info("engine warm-up: %d throwaway steps...", ENGINE_WARMUP_STEPS)
+        first_s, last_s = await loop.run_in_executor(
+            self.engine_pool, _warm_up_engine, self.engine
+        )
+        log.info("engine warm-up: first step %.0fms, settled to %.0fms over %d steps",
+                 first_s * 1000, last_s * 1000, ENGINE_WARMUP_STEPS)
         self.router = await loop.run_in_executor(self.route_pool, _load_router, self.cfg)
         self.asr = await loop.run_in_executor(self.asr_pool, _load_asr, self.cfg)
         self.synth = await loop.run_in_executor(self.tts_pool, _load_tts, self.cfg)

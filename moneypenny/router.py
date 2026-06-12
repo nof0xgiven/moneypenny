@@ -31,7 +31,7 @@ CONFIDENCE_FLOOR = 0.7
 _SYSTEM = """You classify a voice assistant utterance into a latency tier. Reply with ONLY a JSON object, no other text:
 {"tier": 0|1|2|3, "tool": "weather"|"homey"|"timer"|null, "args": {}, "confidence": 0.0-1.0}
 
-tier 0: chat, banter, opinions, stories. No facts needed. tool=null.
+tier 0: chat, banter, opinions, stories, and backchannels/acknowledgements ("yeah", "uh huh", "okay cool"). No facts needed. tool=null.
 tier 1: a single reflex action -> tool required:
   weather: current weather questions. args: {}
   homey: home device control. args: {"action": "turn_on"|"turn_off"|"toggle"|"set",
@@ -45,9 +45,20 @@ tier 3: long-running tasks the user wants done in the background ("research X an
 
 If in ANY doubt, use tier 2. Never use tier 1 unless the utterance is unambiguous."""
 
+# Prompt edits here are EMPIRICAL: rerun tests/test_router.py -m "" (greedy
+# decode = deterministic). Interactions are non-linear on this 0.6B model -
+# backchannels ("yeah" -> tier 3 live misroute 2026-06-12) are fixed by the
+# tier 0 sysline above, NOT a fewshot pair: a ("yeah", tier 0) example
+# alongside the garbled-weather pair below flipped "tell me a story about a
+# lighthouse" to tier 1 timer regardless of placement. Every pair also costs
+# prompt tokens on every classification (latency budget: p95 < 300ms).
 _FEWSHOT = [
     ("what's the weather today",
      '{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.97}'),
+    # ASR-garbled weather ask (live misroute 2026-06-12: went tier 0, tool
+    # never fired): disfluencies must not mask a recognizable weather question.
+    ("uh I just wondered what the weather is",
+     '{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.9}'),
     ("turn off the kitchen lights",
      '{"tier": 1, "tool": "homey", "args": {"action": "turn_off", "device": "kitchen lights", '
      '"zone": "kitchen", "capability": null, "value": null}, "confidence": 0.95}'),
