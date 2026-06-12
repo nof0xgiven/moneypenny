@@ -22,10 +22,9 @@ TIER0_OR_2_CASES = [
     "research flight prices to tokyo and email me",  # tier 3 territory; 2 or 3 both fine
 ]
 
-# Production misroutes (live session 2026-06-12): "Yeah." classified tier 3 at
-# 0.9 confidence (a background job for a backchannel!); these must be tier 0
-# exactly - escalating a contentless acknowledgement buys nothing and tier 3
-# would spawn work.
+# Backchannel acknowledgements must be tier 0 exactly: escalating a
+# contentless acknowledgement buys nothing, and a tier 3 classification would
+# spawn background work for filler speech.
 BACKCHANNEL_CASES = [
     "yeah",
     "uh huh",
@@ -33,9 +32,9 @@ BACKCHANNEL_CASES = [
     "yeah that's right",
 ]
 
-# Same session: ASR garbled the weather question and the router sent it to
-# tier 0, so the weather tool never fired and the model claimed it couldn't
-# check. Disfluent-but-recognizable weather asks must still hit the tool.
+# Disfluent-but-recognizable weather asks must still hit the tool: streaming
+# ASR routinely garbles questions, and a tier 0 classification here means the
+# weather tool never fires and the model denies it can check.
 GARBLED_WEATHER_CASES = [
     "uh I just wondered what the weather is",
     "what's the uh weather like out",
