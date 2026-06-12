@@ -24,10 +24,12 @@ Event types emitted by the Session (data keys beyond type/ts):
 
 Threading: emit() is safe from ANY thread — events are always marshalled to
 the owning asyncio loop via call_soon_threadsafe, so subscriber queues and
-the last-event cache are only ever touched on the loop thread. Subscriber
-queues are bounded; on overflow the OLDEST event is dropped (and counted on
-the queue's .dropped attribute) so a slow consumer can neither grow memory
-nor block the loop.
+the last-event cache are only ever touched on the loop thread. Everything
+ELSE (subscribe/unsubscribe/last) is loop-thread-only: the subscriber list
+and last-event cache are unlocked, and the web server — the only caller —
+lives on the loop. Subscriber queues are bounded; on overflow the OLDEST
+event is dropped (and counted on the queue's .dropped attribute) so a slow
+consumer can neither grow memory nor block the loop.
 """
 from __future__ import annotations
 
@@ -35,12 +37,20 @@ import asyncio
 import time
 
 
+class SubscriberQueue(asyncio.Queue):
+    """Bounded per-subscriber queue; .dropped counts overflow drops."""
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__(maxsize=maxsize)
+        self.dropped = 0
+
+
 class EventBus:
     DEFAULT_MAXSIZE = 256
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
-        self._subscribers: list[asyncio.Queue] = []
+        self._subscribers: list[SubscriberQueue] = []
         self._last: dict[str, dict] = {}
 
     def emit(self, type_: str, **data) -> None:
@@ -57,16 +67,20 @@ class EventBus:
                 q.dropped += 1
             q.put_nowait(event)
 
-    def subscribe(self, maxsize: int = DEFAULT_MAXSIZE) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
-        q.dropped = 0  # overflow counter, read by the web server for diagnostics
+    def subscribe(self, maxsize: int = DEFAULT_MAXSIZE) -> SubscriberQueue:
+        """Loop-thread only. maxsize must be positive: 0 would mean an
+        UNBOUNDED asyncio.Queue, defeating the drop-oldest overflow guard."""
+        assert maxsize > 0, "subscriber queues must be bounded (maxsize > 0)"
+        q = SubscriberQueue(maxsize=maxsize)
         self._subscribers.append(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue) -> None:
+    def unsubscribe(self, q: SubscriberQueue) -> None:
+        """Loop-thread only."""
         if q in self._subscribers:
             self._subscribers.remove(q)
 
     def last(self, type_: str) -> dict | None:
-        """Most recent event of a type (web server replays status/session)."""
+        """Loop-thread only: most recent event of a type (the web server
+        replays status/session to new connections)."""
         return self._last.get(type_)

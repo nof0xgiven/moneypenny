@@ -196,7 +196,11 @@ class Session:
 
     Lifecycle: construct -> load() once -> start()/stop() any number of times.
     Timers and queued injections are cancelled/drained on stop() so a stopped
-    conversation can never inject into the next one."""
+    conversation can never inject into the next one.
+
+    ONE Session per process: the import-affinity invariant (module docstring)
+    holds for whichever engine worker imports mlx first; a second Session's
+    engine would lose that race and pay the ~80ms/frame penalty."""
 
     def __init__(self, cfg: Config, bus: EventBus) -> None:
         self.cfg = cfg
@@ -263,10 +267,22 @@ class Session:
         log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
         self.bus.emit("session", state="ready", home_control=homey is not None)
 
+    def _on_frame_loop_done(self, t: asyncio.Task) -> None:
+        """Done-callback for the frame-loop task: surface crashes both in the
+        log and on the bus, so the dashboard's last `session` event can never
+        stay stuck on "live" after the loop has died (invariant #2)."""
+        if t.cancelled() or t.exception() is None:
+            return
+        log.error("frame loop crashed: %r", t.exception())
+        self.bus.emit("session", state="error", reason=repr(t.exception()))
+
     async def start(self) -> None:
         """Open audio and spawn the frame loop. Fresh conversation state each call."""
         if self._loop_task is not None:
-            raise RuntimeError("session already started (stop() it first)")
+            if not self._loop_task.done():
+                raise RuntimeError("session already started (stop() it first)")
+            # previous loop crashed: clean up its audio/timers before restarting
+            await self.stop()
         if self.engine is None:
             raise RuntimeError("session not loaded (call load() first)")
 
@@ -280,10 +296,7 @@ class Session:
         self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
         # Surface frame-loop crashes even when nobody awaits the task (the web
         # server path) - never silently swallowed (invariant #2).
-        self._loop_task.add_done_callback(
-            lambda t: (not t.cancelled() and t.exception())
-            and log.error("frame loop crashed: %r", t.exception())
-        )
+        self._loop_task.add_done_callback(self._on_frame_loop_done)
         self.bus.emit("session", state="live")
 
     async def stop(self) -> None:
@@ -313,6 +326,13 @@ class Session:
                 self.engine_pool, self.engine.reset_session
             )
         self.bus.emit("session", state="stopped")
+
+    async def wait(self) -> None:
+        """Block until the frame loop ends: forever for the headless CLI,
+        propagating a frame-loop crash to the caller (same surfacing as the
+        pre-Session inline loop). No-op if not started."""
+        if self._loop_task is not None:
+            await self._loop_task
 
     async def _frame_loop(self, audio: AudioIO) -> None:
         """One live conversation. Cancellation-safe: every blocking point is an
@@ -532,9 +552,7 @@ async def main() -> None:
     session = Session(cfg, bus)
     await session.load()
     await session.start()
-    # Headless CLI: run until killed; awaiting the task propagates frame-loop
-    # crashes to asyncio.run (same surfacing as the pre-Session inline loop).
-    await session._loop_task
+    await session.wait()  # run until killed; crashes propagate to asyncio.run
 
 
 def run() -> None:
