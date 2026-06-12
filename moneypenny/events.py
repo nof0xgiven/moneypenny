@@ -11,6 +11,10 @@ Event types emitted by the Session (data keys beyond type/ts):
   audio    {"mic_rms": float, "out_rms": float}            every frame
   vad      {"event": str, "partial": str}                  each VAD event
   partial  {"text": str}                                   on partial change
+  gate     {"transcript": str,
+            "blocked": "empty" | "backchannel" | "duplicate" | "self_echo"}
+           classification suppressed before the route worker
+           (filter semantics: moneypenny/classify_gate.py)
   route    {"transcript": str, "tier": int, "tool": str|None,
             "confidence": float}                           route worker
   tool     after a Tier-1 execution attempt:

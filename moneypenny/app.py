@@ -16,6 +16,12 @@ Flow per 80ms frame:
                                     the partial lags <=160ms from pair-batching)
   VAD utterance_end (640ms)      -> if the final transcript materially grew and
                                     nothing executed yet, re-classify on it
+  Both classification paths first pass through ClassifyGate (classify_gate.py),
+  fed every text piece the model speaks: pure backchannel ("Yeah."), repeats
+  of the already-classified partial, and transcripts overlapping the model's
+  own recent speech (speaker leak, no AEC yet) are dropped with a `gate` bus
+  event instead of burning a ~200ms router call - or, for the echo phantoms,
+  escalating/executing tools on the model's own words.
   RouteDecision tier 1 -> ToolHost -> briefing text -> BriefingSynth (tts worker)
                                     -> engine.inject_audio (engine worker; the
                                     engine gates injection on output silence)
@@ -106,6 +112,7 @@ from dotenv import load_dotenv
 from moneypenny.asr_gate import AsrGate
 from moneypenny.audio import AudioIO
 from moneypenny.briefing import compose
+from moneypenny.classify_gate import ClassifyGate
 from moneypenny.config import Config
 from moneypenny.events import EventBus
 from moneypenny.injection import InjectionQueue
@@ -258,6 +265,7 @@ class Session:
         self._vad: EnergyVAD | None = None
         self._gate: AsrGate | None = None
         self._utt: UtteranceState | None = None
+        self._classify_gate: ClassifyGate | None = None
 
     @property
     def running(self) -> bool:
@@ -334,6 +342,7 @@ class Session:
             self._vad = EnergyVAD(rms_threshold=self.cfg.vad_rms_threshold)
             self._gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
             self._utt = UtteranceState()
+            self._classify_gate = ClassifyGate()  # fresh dedupe + echo window per conversation
 
             log.info("audio defaults: device=%s input=%s output=%s",
                      sd.default.device, _describe_device("input"), _describe_device("output"))
@@ -409,6 +418,7 @@ class Session:
         asr_pool, tts_pool = self.asr_pool, self.tts_pool
         injections, host = self.injections, self.host
         vad, gate, utt = self._vad, self._gate, self._utt
+        classify_gate = self._classify_gate
 
         def classify_and_execute(transcript: str, t_marked: float, gen: int) -> None:
             """Runs on route_pool. Failures become log lines + (where sensible) briefings."""
@@ -444,6 +454,18 @@ class Session:
             fut.add_done_callback(
                 lambda f: f.exception() and log.error("route worker error: %r", f.exception())
             )
+
+        def gated_classification(transcript: str) -> None:
+            """Single entry to the route worker: the gate drops backchannel,
+            repeats, and self-echo phantoms (classify_gate.py) before they
+            cost a router call (or execute a tool on the model's own words)."""
+            now = time.perf_counter()
+            allowed, reason = classify_gate.should_classify(transcript, now)
+            if allowed:
+                submit_classification(transcript, now)
+            else:
+                log.debug("gate blocked %r (%s)", transcript, reason)
+                bus.emit("gate", transcript=transcript, blocked=reason)
 
         # --- timed worker wrappers (timings feed the status line) ---
 
@@ -565,16 +587,20 @@ class Session:
                 bus.emit("vad", event=event, partial=partial)
             if event == "speech_start":
                 utt.reset()
+                classify_gate.reset_utterance()
             elif event == "maybe_end" and partial.strip():
                 # classify on the partial BEFORE the utterance is confirmed over
-                submit_classification(partial, time.perf_counter())
+                gated_classification(partial)
             elif event == "utterance_end":
                 # the gate force-flushed its buffered frame into this frame's
                 # add_frame (just awaited), so finish() sees the full hangover tail
                 final = await loop.run_in_executor(asr_pool, _finish_and_reset)
+                # "grew" dedupes across the soft/hard boundary on the RAW strings;
+                # the classify gate's duplicate filter additionally catches
+                # case/punctuation-only growth. Both stay: they're cheap.
                 grew = final.strip() and final.strip() != (utt.classified_text or "").strip()
                 if grew and utt.executed_gen != utt.gen:
-                    submit_classification(final, time.perf_counter())
+                    gated_classification(final)
                 partial = ""
                 emitted_partial = ""
 
@@ -582,6 +608,9 @@ class Session:
                 audio.speaker_frames.put_nowait(audio_out)
             if text:
                 print(text, end="", flush=True)
+                # echo-window evidence: what the model is saying right now is
+                # what a speaker leak will hand ASR a moment later
+                classify_gate.note_model_text(text, time.perf_counter())
 
             win_frames += 1
             if win_frames >= STATUS_EVERY_FRAMES:

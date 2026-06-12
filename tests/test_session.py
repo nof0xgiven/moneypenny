@@ -15,6 +15,7 @@ import time
 import pytest
 
 from moneypenny.app import Session
+from moneypenny.classify_gate import ClassifyGate
 from moneypenny.config import Config
 from moneypenny.events import EventBus
 
@@ -132,6 +133,21 @@ async def test_start_during_inflight_stop_waits_for_stop(monkeypatch):
     assert s._audio is not None  # the restarted conversation kept its audio
     assert s._audio.closes == 0
     assert bus.last("session")["state"] == "live"  # stopped emitted BEFORE live
+    await s.stop()
+
+
+async def test_start_constructs_fresh_classify_gate_per_conversation(monkeypatch):
+    """The classify gate carries per-conversation state (dedupe memory, the
+    model-speech echo window): a restarted conversation must not inherit it."""
+    bus = EventBus(asyncio.get_running_loop())
+    s = _startable_session(bus, monkeypatch)
+    await s.start()
+    first = s._classify_gate
+    assert isinstance(first, ClassifyGate)
+    await s.stop()
+    await s.start()
+    assert isinstance(s._classify_gate, ClassifyGate)
+    assert s._classify_gate is not first  # no gate state leaks across conversations
     await s.stop()
 
 
