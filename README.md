@@ -85,7 +85,7 @@ Two voices, two audiences, set by environment variable:
 
 ## Status and known limits
 
-Phase 1. Acceptance results, fact-bait scores, and the pending live checklist sit in `docs/decisions/0002-phase1-acceptance.md`. Two limits worth knowing before you file a bug:
+Phase 1. Acceptance results, fact-bait scores, and the pending live checklist sit in `docs/decisions/0002-phase1-acceptance.md`. The conversation-quality fixes for open speakers (engine warm-up, classification gate, clarification restraint, echo cancellation) and their live verification are recorded in `docs/decisions/0003-conversation-quality.md`. Two limits worth knowing before you file a bug:
 
 - A continuous session crashes after about 5.5 minutes: rustymimi's streaming encoder has a fixed 8192-position cache (limitation 8 in the acceptance doc).
 - Briefing uptake is probabilistic. The injection mechanism works, and the model still hedges or rephrases on some trajectories (open risks in decision 0001).
