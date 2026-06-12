@@ -105,6 +105,7 @@ from moneypenny.asr_gate import AsrGate
 from moneypenny.audio import AudioIO
 from moneypenny.briefing import compose
 from moneypenny.config import Config
+from moneypenny.events import EventBus
 from moneypenny.injection import InjectionQueue
 from moneypenny.prompts import FRONT_OF_HOUSE
 from moneypenny.tools import ToolHost
@@ -186,131 +187,234 @@ class UtteranceState:
         self.classified_text = None
 
 
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    load_dotenv()
-    cfg = Config.from_env()
-    loop = asyncio.get_running_loop()
+class Session:
+    """Owns the worker pools, the loaded models, and (while running) one live
+    conversation: AudioIO + the frame-loop task. The web server (phase 2)
+    drives it via load()/start()/stop(); the headless CLI path (main) does the
+    same and then awaits the frame loop forever. Structured events go to the
+    EventBus alongside the existing logs (event shapes: moneypenny/events.py).
 
-    # Pools first: MLX models must be constructed on the worker thread that
-    # will run them (streams are thread-bound; see module docstring).
-    engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
-    route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
-    asr_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
-    tts_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+    Lifecycle: construct -> load() once -> start()/stop() any number of times.
+    Timers and queued injections are cancelled/drained on stop() so a stopped
+    conversation can never inject into the next one."""
 
-    log.info("loading models (engine, router, asr, tts)...")
-    # Engine FIRST: its worker must win the first-mlx-import race (import
-    # affinity, module docstring) before the other pools touch mlx.
-    engine = await loop.run_in_executor(engine_pool, _load_engine, cfg)
-    router = await loop.run_in_executor(route_pool, _load_router, cfg)
-    asr = await loop.run_in_executor(asr_pool, _load_asr, cfg)
-    synth = await loop.run_in_executor(tts_pool, _load_tts, cfg)
-    vad = EnergyVAD(rms_threshold=cfg.vad_rms_threshold)
-    gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
-    injections = InjectionQueue()
-    timers = TimerService(
-        on_fire=lambda label: injections.put(compose("briefing", f"TIMER DONE {label.upper()}")),
-        loop=loop,
-    )
-    homey = None
-    homey_status = "unconfigured"
-    if cfg.homey_configured:
-        try:
-            homey = HomeyAdapter.from_config(cfg)
-        except Exception:
-            homey_status = "unavailable"
-            log.exception(
-                "home control DISABLED: HomeyAdapter construction failed "
-                "(box unreachable or bad credentials?) - continuing without it"
-            )
-    else:
-        log.info("home control DISABLED: HOMEY_BASE_URL/HOMEY_API_KEY not set")
-    host = ToolHost(cfg, homey, timers, homey_status=homey_status)
-    log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
+    def __init__(self, cfg: Config, bus: EventBus) -> None:
+        self.cfg = cfg
+        self.bus = bus
 
-    utt = UtteranceState()
+        # Pools first: MLX models must be constructed on the worker thread that
+        # will run them (streams are thread-bound; see module docstring).
+        self.engine_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine")
+        self.route_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="route")
+        self.asr_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
+        self.tts_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
 
-    def classify_and_execute(transcript: str, t_marked: float, gen: int) -> None:
-        """Runs on route_pool. Failures become log lines + (where sensible) briefings."""
-        try:
-            decision = router.classify(transcript)
-            log.info("route %r -> %s", transcript, decision)
-            if decision.tier == 1 and gen == utt.gen and utt.executed_gen != gen:
-                utt.executed_gen = gen  # claim before executing: never run a tool twice
-                try:
-                    briefing = host.execute(decision)  # action > narration
-                except Exception:
-                    log.exception("tool execution failed for %r", transcript)
-                    briefing = compose("briefing", "TOOL FAILED TELL USER YOU HIT A SNAG")
-                if briefing:
-                    injections.put(briefing)
-                    log.info("briefing queued %.0fms after boundary: %r",
-                             (time.perf_counter() - t_marked) * 1000, briefing)
-            elif decision.tier in (2, 3):
-                log.info("tier %d escalation (phase 2 wiring pending): %r",
-                         decision.tier, transcript)
-        except Exception:
-            log.exception("router crashed on %r", transcript)
+        # set by load()
+        self.engine = None
+        self.router = None
+        self.asr = None
+        self.synth = None
+        self.injections: InjectionQueue | None = None
+        self.timers: TimerService | None = None
+        self.host: ToolHost | None = None
 
-    def submit_classification(transcript: str, t_marked: float) -> None:
-        utt.classified_text = transcript
-        fut = route_pool.submit(classify_and_execute, transcript, t_marked, utt.gen)
-        fut.add_done_callback(
-            lambda f: f.exception() and log.error("route worker error: %r", f.exception())
+        # per-conversation state, set by start()
+        self._audio: AudioIO | None = None
+        self._loop_task: asyncio.Task | None = None
+        self._vad: EnergyVAD | None = None
+        self._gate: AsrGate | None = None
+        self._utt: UtteranceState | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._loop_task is not None and not self._loop_task.done()
+
+    async def load(self) -> None:
+        """Load all models onto their worker threads. Call once."""
+        loop = asyncio.get_running_loop()
+        self.bus.emit("session", state="loading")
+        log.info("loading models (engine, router, asr, tts)...")
+        # Engine FIRST: its worker must win the first-mlx-import race (import
+        # affinity, module docstring) before the other pools touch mlx.
+        self.engine = await loop.run_in_executor(self.engine_pool, _load_engine, self.cfg)
+        self.router = await loop.run_in_executor(self.route_pool, _load_router, self.cfg)
+        self.asr = await loop.run_in_executor(self.asr_pool, _load_asr, self.cfg)
+        self.synth = await loop.run_in_executor(self.tts_pool, _load_tts, self.cfg)
+        injections = InjectionQueue()
+        self.injections = injections
+        self.timers = TimerService(
+            on_fire=lambda label: injections.put(compose("briefing", f"TIMER DONE {label.upper()}")),
+            loop=loop,
         )
+        homey = None
+        homey_status = "unconfigured"
+        if self.cfg.homey_configured:
+            try:
+                homey = HomeyAdapter.from_config(self.cfg)
+            except Exception:
+                homey_status = "unavailable"
+                log.exception(
+                    "home control DISABLED: HomeyAdapter construction failed "
+                    "(box unreachable or bad credentials?) - continuing without it"
+                )
+        else:
+            log.info("home control DISABLED: HOMEY_BASE_URL/HOMEY_API_KEY not set")
+        self.host = ToolHost(self.cfg, homey, self.timers, homey_status=homey_status)
+        log.info("models loaded (home control %s)", "enabled" if homey else "disabled")
+        self.bus.emit("session", state="ready", home_control=homey is not None)
 
-    # --- timed worker wrappers (timings feed the status line) ---
+    async def start(self) -> None:
+        """Open audio and spawn the frame loop. Fresh conversation state each call."""
+        if self._loop_task is not None:
+            raise RuntimeError("session already started (stop() it first)")
+        if self.engine is None:
+            raise RuntimeError("session not loaded (call load() first)")
 
-    def _asr_timed(buf: np.ndarray) -> tuple[str, float]:
-        """Runs on the asr worker."""
-        t0 = time.perf_counter()
-        return asr.add_frame(buf), time.perf_counter() - t0
+        self._vad = EnergyVAD(rms_threshold=self.cfg.vad_rms_threshold)
+        self._gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
+        self._utt = UtteranceState()
 
-    def _step_timed(mic_frame: np.ndarray) -> tuple[tuple[np.ndarray | None, str], float]:
-        """Runs on the engine worker."""
-        t0 = time.perf_counter()
-        return engine.step(mic_frame), time.perf_counter() - t0
+        log.info("audio defaults: device=%s input=%s output=%s",
+                 sd.default.device, _describe_device("input"), _describe_device("output"))
+        self._audio = AudioIO().__enter__()
+        self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
+        # Surface frame-loop crashes even when nobody awaits the task (the web
+        # server path) - never silently swallowed (invariant #2).
+        self._loop_task.add_done_callback(
+            lambda t: (not t.cancelled() and t.exception())
+            and log.error("frame loop crashed: %r", t.exception())
+        )
+        self.bus.emit("session", state="live")
 
-    def _finish_and_reset() -> str:
-        """Runs on the asr worker: ALL transcriber calls stay on that one
-        thread (thread affinity, module docstring)."""
-        final = asr.finish()
-        asr.reset()
-        return final
-
-    def _synthesize_timed(text: str) -> tuple[np.ndarray, float]:
-        """Runs on the tts worker."""
-        t0 = time.perf_counter()
-        return synth.synthesize(text), time.perf_counter() - t0
-
-    def _inject_synthesized(f: "asyncio.Future") -> None:
-        """Loop-thread done-callback: hand finished briefing PCM to the engine
-        worker. Failures become log lines, never silent."""
-        if f.exception():
-            log.error("briefing tts error: %r", f.exception())
+    async def stop(self) -> None:
+        """Tear down the live conversation. Idempotent."""
+        if self._loop_task is None and self._audio is None:
             return
-        pcm, dur = f.result()
-        log.info("briefing synthesized in %.0fms (%.1fs of audio); queueing inject",
-                 dur * 1000, pcm.shape[-1] / Config.SAMPLE_RATE)
-        inj_fut = loop.run_in_executor(engine_pool, engine.inject_audio, pcm)
-        inj_fut.add_done_callback(
-            lambda g: g.exception() and log.error("inject error: %r", g.exception())
-        )
+        task, self._loop_task = self._loop_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass  # already surfaced by the done-callback added in start()
+        if self._audio is not None:
+            self._audio.__exit__(None, None, None)
+            self._audio = None
+        # fresh conversation per start(): no leftover timers or queued briefings
+        if self.timers is not None:
+            self.timers.cancel_all()
+        if self.injections is not None:
+            while self.injections.get() is not None:
+                pass
+        if self.engine is not None:
+            await asyncio.get_running_loop().run_in_executor(
+                self.engine_pool, self.engine.reset_session
+            )
+        self.bus.emit("session", state="stopped")
 
-    log.info("audio defaults: device=%s input=%s output=%s",
-             sd.default.device, _describe_device("input"), _describe_device("output"))
+    async def _frame_loop(self, audio: AudioIO) -> None:
+        """One live conversation. Cancellation-safe: every blocking point is an
+        await, so stop()'s task.cancel() lands cleanly between frames."""
+        loop = asyncio.get_running_loop()
+        bus = self.bus
+        engine, router, asr, synth = self.engine, self.router, self.asr, self.synth
+        engine_pool, route_pool = self.engine_pool, self.route_pool
+        asr_pool, tts_pool = self.asr_pool, self.tts_pool
+        injections, host = self.injections, self.host
+        vad, gate, utt = self._vad, self._gate, self._utt
 
-    # diagnostics window (reset each status report)
-    win_frames = 0
-    win_start = time.perf_counter()
-    win_max_rms = 0.0
-    win_asr_s = 0.0
-    win_step_s = 0.0
+        def classify_and_execute(transcript: str, t_marked: float, gen: int) -> None:
+            """Runs on route_pool. Failures become log lines + (where sensible) briefings."""
+            try:
+                decision = router.classify(transcript)
+                log.info("route %r -> %s", transcript, decision)
+                bus.emit("route", transcript=transcript, tier=decision.tier,
+                         tool=decision.tool, confidence=decision.confidence)
+                if decision.tier == 1 and gen == utt.gen and utt.executed_gen != gen:
+                    utt.executed_gen = gen  # claim before executing: never run a tool twice
+                    try:
+                        briefing = host.execute(decision)  # action > narration
+                        executed_ok = True
+                    except Exception:
+                        log.exception("tool execution failed for %r", transcript)
+                        briefing = compose("briefing", "TOOL FAILED TELL USER YOU HIT A SNAG")
+                        executed_ok = False
+                    bus.emit("tool", ok=executed_ok, briefing=briefing, transcript=transcript)
+                    if briefing:
+                        injections.put(briefing)
+                        log.info("briefing queued %.0fms after boundary: %r",
+                                 (time.perf_counter() - t_marked) * 1000, briefing)
+                elif decision.tier in (2, 3):
+                    log.info("tier %d escalation (phase 2 wiring pending): %r",
+                             decision.tier, transcript)
+                    bus.emit("tool", ok=False, escalated=decision.tier, transcript=transcript)
+            except Exception:
+                log.exception("router crashed on %r", transcript)
 
-    partial = ""
+        def submit_classification(transcript: str, t_marked: float) -> None:
+            utt.classified_text = transcript
+            fut = route_pool.submit(classify_and_execute, transcript, t_marked, utt.gen)
+            fut.add_done_callback(
+                lambda f: f.exception() and log.error("route worker error: %r", f.exception())
+            )
 
-    with AudioIO() as audio:
+        # --- timed worker wrappers (timings feed the status line) ---
+
+        def _asr_timed(buf: np.ndarray) -> tuple[str, float]:
+            """Runs on the asr worker."""
+            t0 = time.perf_counter()
+            return asr.add_frame(buf), time.perf_counter() - t0
+
+        def _step_timed(mic_frame: np.ndarray) -> tuple[tuple[np.ndarray | None, str], float]:
+            """Runs on the engine worker."""
+            t0 = time.perf_counter()
+            return engine.step(mic_frame), time.perf_counter() - t0
+
+        def _finish_and_reset() -> str:
+            """Runs on the asr worker: ALL transcriber calls stay on that one
+            thread (thread affinity, module docstring)."""
+            final = asr.finish()
+            asr.reset()
+            return final
+
+        def _synthesize_timed(text: str) -> tuple[np.ndarray, float]:
+            """Runs on the tts worker."""
+            t0 = time.perf_counter()
+            return synth.synthesize(text), time.perf_counter() - t0
+
+        def _inject_synthesized(f: "asyncio.Future") -> None:
+            """Loop-thread done-callback: hand finished briefing PCM to the engine
+            worker. Failures become log lines, never silent."""
+            if f.exception():
+                log.error("briefing tts error: %r", f.exception())
+                return
+            pcm, dur = f.result()
+            log.info("briefing synthesized in %.0fms (%.1fs of audio); queueing inject",
+                     dur * 1000, pcm.shape[-1] / Config.SAMPLE_RATE)
+            bus.emit("briefing", stage="synthesized", ms=dur * 1000,
+                     audio_s=pcm.shape[-1] / Config.SAMPLE_RATE)
+            inj_fut = loop.run_in_executor(engine_pool, engine.inject_audio, pcm)
+
+            def _injected(g: "asyncio.Future") -> None:
+                if g.exception():
+                    log.error("inject error: %r", g.exception())
+                else:
+                    bus.emit("briefing", stage="injected")
+
+            inj_fut.add_done_callback(_injected)
+
+        # diagnostics window (reset each status report)
+        win_frames = 0
+        win_start = time.perf_counter()
+        win_max_rms = 0.0
+        win_asr_s = 0.0
+        win_step_s = 0.0
+
+        partial = ""
+        emitted_partial = ""  # last value sent as a "partial" event
+
         log.info("session live - speak")
         while True:
             try:
@@ -333,7 +437,8 @@ async def main() -> None:
                 log.warning("catch-up: dropped %d silent mic frames (~%.1fs of drift)",
                             dropped, dropped * 0.08)
 
-            win_max_rms = max(win_max_rms, float(np.sqrt(np.mean(mic ** 2))))
+            mic_rms = float(np.sqrt(np.mean(mic ** 2)))
+            win_max_rms = max(win_max_rms, mic_rms)
 
             # VAD first (cheap RMS), then the gate decides whether ASR runs
             # at all this frame; gated-off frames cost zero ASR work (P0.1
@@ -361,11 +466,18 @@ async def main() -> None:
                 (audio_out, text), step_s = await step_fut
             win_step_s += step_s
 
+            out_rms = float(np.sqrt(np.mean(audio_out ** 2))) if audio_out is not None else 0.0
+            bus.emit("audio", mic_rms=mic_rms, out_rms=out_rms)
+            if gate.active and partial != emitted_partial:
+                bus.emit("partial", text=partial)
+                emitted_partial = partial
+
             # VAD events are handled AFTER the gather so maybe_end classifies
             # on the freshest partial (it arrives one gather later than the
             # pre-overlap design, <=80ms).
             if event:
                 log.info("vad %s partial=%r", event, partial)
+                bus.emit("vad", event=event, partial=partial)
             if event == "speech_start":
                 utt.reset()
             elif event == "maybe_end" and partial.strip():
@@ -379,6 +491,7 @@ async def main() -> None:
                 if grew and utt.executed_gen != utt.gen:
                     submit_classification(final, time.perf_counter())
                 partial = ""
+                emitted_partial = ""
 
             if audio_out is not None:
                 audio.speaker_frames.put_nowait(audio_out)
@@ -388,20 +501,40 @@ async def main() -> None:
             win_frames += 1
             if win_frames >= STATUS_EVERY_FRAMES:
                 elapsed = time.perf_counter() - win_start
+                fps = win_frames / elapsed if elapsed > 0 else 0.0
                 log.info(
                     "status: micq=%d spkq=%d underruns=%d micRMS=%.6f vad=%s asr_on=%s "
                     "asr_len=%d fps=%.1f asr_ms=%.0f step_ms=%.0f",
                     audio.mic_frames.qsize(), audio.speaker_frames.qsize(),
                     audio.underruns,
                     win_max_rms, vad.in_speech, gate.active, len(partial),
-                    win_frames / elapsed if elapsed > 0 else 0.0,
+                    fps,
                     win_asr_s / win_frames * 1000, win_step_s / win_frames * 1000,
                 )
+                bus.emit("status",
+                         micq=audio.mic_frames.qsize(), spkq=audio.speaker_frames.qsize(),
+                         underruns=audio.underruns, mic_rms_max=win_max_rms,
+                         vad=vad.in_speech, asr_on=gate.active, fps=fps,
+                         asr_ms=win_asr_s / win_frames * 1000,
+                         step_ms=win_step_s / win_frames * 1000)
                 win_frames = 0
                 win_start = time.perf_counter()
                 win_max_rms = 0.0
                 win_asr_s = 0.0
                 win_step_s = 0.0
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    load_dotenv()
+    cfg = Config.from_env()
+    bus = EventBus(asyncio.get_running_loop())
+    session = Session(cfg, bus)
+    await session.load()
+    await session.start()
+    # Headless CLI: run until killed; awaiting the task propagates frame-loop
+    # crashes to asyncio.run (same surfacing as the pre-Session inline loop).
+    await session._loop_task
 
 
 def run() -> None:
