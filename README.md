@@ -1,35 +1,36 @@
 # Moneypenny
 
-Moneypenny is a local voice assistant built on PersonaPlex MLX. A full-duplex
-speech model carries the conversation while a tier router classifies each
-utterance from streaming ASR partials; Tier 1 tool results (weather, Homey
-devices, timers) are fed back to the model as synthesized "earpiece briefings"
-on the user audio channel, gated on output silence, so the model speaks the
-facts in character. The design and requirements live in
-`docs/moneypenny-spec.md`; architecture decisions live in `docs/decisions/`.
+A voice assistant that runs on your Mac. A full-duplex speech model carries the conversation, and a toolchain feeds it facts through a synthetic earpiece.
+
+Full-duplex speech models hold a conversation well and invent facts badly. Moneypenny splits the job. PersonaPlex talks to you. A router (Qwen3, local) reads the live transcript from streaming ASR and fires tools for weather, Homey devices, and timers while you finish your sentence. Each tool result comes back as a terse spoken briefing, synthesized in a second voice and played into the model's audio input once the model stops speaking. The model works the facts into its reply in its own words. You hear one assistant. The briefing channel stays inaudible.
+
+Every model runs on Apple Silicon: PersonaPlex for speech, parakeet for ASR, Qwen3 for routing, Kokoro for briefing TTS. The reflex path makes no cloud calls.
+
+The spec lives in `docs/moneypenny-spec.md`. Architecture decisions, with the spike evidence behind them, live in `docs/decisions/`.
+
+## Requirements
+
+- Apple Silicon Mac (MLX). Measured real time on an M3 Ultra: 12.5 fps, 64 ms per engine step.
+- Python 3.12
+- A local checkout of `personaplex-mlx`; weights for `nvidia/personaplex-7b-v1` download to your Hugging Face cache on first run
+- Headphones. There is no echo cancellation, and open speakers feed the model its own voice.
 
 ## Setup
-
-Requires Python 3.12 and Apple Silicon (MLX).
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-# personaplex-mlx is a local editable install, not a PyPI package:
+# personaplex-mlx installs from a local checkout, not PyPI:
 pip install -e ~/orca/personaplex-mlx
-# If its declared dependencies conflict in your environment, install it with
-# --no-deps instead; this repo's pyproject already declares everything the
-# engine imports (rustymimi, sentencepiece, sphn, mlx-audio, ...):
+# If its pinned deps conflict with yours, use --no-deps; this repo's
+# pyproject declares everything the engine imports:
 #   pip install -e ~/orca/personaplex-mlx --no-deps
 
 pip install -e ".[dev]"
 ```
 
-## Fixtures
-
-Slow tests replay synthesized WAV fixtures. Generate them once before running
-the slow suite:
+Generate the test fixtures once before running the slow suite:
 
 ```bash
 python spikes/make_fixtures.py
@@ -38,52 +39,39 @@ python spikes/make_fixtures.py
 ## Tests
 
 ```bash
-pytest          # fast suite (pure logic; default, slow tests deselected)
-pytest -m slow  # slow suite (loads models / hits live services)
+pytest          # fast suite: pure logic, no model loads
+pytest -m slow  # loads real models, hits live services
 pytest -m ""    # everything
 ```
 
-## Live run
+The slow tests run real inference. There are no mocked models anywhere in the suite.
 
-Copy `.env.example` to `.env`. `HOMEY_BASE_URL` and `HOMEY_API_KEY` are
-optional — without them the app runs with home control disabled (home-control
-commands get a spoken "not set up" response). Then run with headphones on —
-there is no echo cancellation, so open speakers will feed the model its own
-voice:
+## Run
+
+Copy `.env.example` to `.env`. `HOMEY_BASE_URL` and `HOMEY_API_KEY` are optional; without them the app starts with home control disabled and says so when asked to touch the lights. Set `VAD_RMS_THRESHOLD` above your room's noise floor (the status log prints `micRMS` so you can read it off).
 
 ```bash
 .venv/bin/moneypenny
 ```
 
-The frame loop runs real time on an M3 Ultra (fps=12.5, step≈64ms; see
-decision 0002, known limitation 6 for the measurements behind this). While
-you speak, ASR runs concurrently with the engine step on its own worker
-(per-frame cost is max(asr, step), not the sum), and briefing TTS runs on a
-separate worker so injections never stall the engine — the status line's
-`underruns` counter should stay flat outside the startup warm-up.
-Known ceiling: a continuous session currently crashes after ~5.5 minutes
-(rustymimi 8192-position streaming-cache limit — decision 0002, known
-limitation 8).
+The log prints a status line every two seconds:
 
-## Choosing voices
+```
+status: micq=0 spkq=13 underruns=154 micRMS=0.015 vad=False asr_on=False fps=12.5 asr_ms=0 step_ms=63
+```
 
-Two independent voices, selected via environment variables:
+Healthy idle: `fps=12.5`, `asr_on=False`, `micq=0`, `underruns` flat after warm-up. ASR runs on its own worker while you speak, briefing TTS runs on another, and the engine never waits for either.
 
-- `MONEYPENNY_VOICE` (default `NATF2`) — the PersonaPlex voice prompt:
-  Moneypenny's own voice, the one **you hear** on the speakers. Legal values
-  (the voice prompts shipped with `nvidia/personaplex-7b-v1`): `NATF0` `NATF1`
-  `NATF2` `NATF3` `NATM0` `NATM1` `NATM2` `NATM3` `VARF0` `VARF1` `VARF2`
-  `VARF3` `VARF4` `VARM0` `VARM1` `VARM2` `VARM3` `VARM4` (NAT = natural,
-  VAR = varied; F/M = female/male).
-- `BRIEFING_VOICE` (default `am_michael`) — the Kokoro voice used to TTS tool
-  briefings onto the model's user-audio channel: **only the model hears it**,
-  never the speakers. `am_michael` is the spike-proven value; any other Kokoro
-  voice (e.g. `af_heart`, `bm_george`, `bf_emma`, `am_adam`) is untested
-  territory here. A typo'd voice fails fast: startup runs a one-word synthesis
-  probe and aborts with an error naming the voice, rather than failing
-  silently at the first briefing. Whatever you pick, keep it clearly distinct from the actual
-  user's voice — distinctness is what stops the model treating briefings as
-  user speech (see `docs/decisions/0001-injection-mechanism.md`).
+## Voices
 
-Phase 1 acceptance status (test results, fact-bait scores, pending live
-checklist) is recorded in `docs/decisions/0002-phase1-acceptance.md`.
+Two voices, two audiences, set by environment variable:
+
+- `MONEYPENNY_VOICE` (default `NATF2`): the PersonaPlex voice you hear. Shipped prompts: `NATF0`-`NATF3`, `NATM0`-`NATM3`, `VARF0`-`VARF4`, `VARM0`-`VARM4`.
+- `BRIEFING_VOICE` (default `am_michael`): the Kokoro voice that reads tool briefings to the model. Only the model hears it. Keep it distinct from your own voice; the model treats a briefing in a user-like voice as user speech and answers it instead of absorbing it (`docs/decisions/0001-injection-mechanism.md`). A typo'd voice name aborts at startup with a probe error instead of failing at the first briefing.
+
+## Status and known limits
+
+Phase 1. Acceptance results, fact-bait scores, and the pending live checklist sit in `docs/decisions/0002-phase1-acceptance.md`. Two limits worth knowing before you file a bug:
+
+- A continuous session crashes after about 5.5 minutes: rustymimi's streaming encoder has a fixed 8192-position cache (limitation 8 in the acceptance doc).
+- Briefing uptake is probabilistic. The injection mechanism works, and the model still hedges or rephrases on some trajectories (open risks in decision 0001).
