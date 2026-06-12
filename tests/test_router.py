@@ -41,6 +41,13 @@ GARBLED_WEATHER_CASES = [
     "what's the uh weather like out",
 ]
 
+# Guard on the _SYSTEM backchannel line: an acknowledgement PREFIX must not
+# drag a real command into tier 0 - the command still wins.
+BACKCHANNEL_PREFIXED_COMMAND_CASES = [
+    ("yeah turn off the office lights", "homey"),
+    ("okay set a timer for five minutes", "timer"),
+]
+
 
 @pytest.fixture(scope="module")
 def router():
@@ -92,6 +99,14 @@ def test_garbled_weather_still_routes_to_tool(router, utterance):
     d = router.classify(utterance)
     assert d.tier == 1
     assert d.tool == "weather"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("utterance,tool", BACKCHANNEL_PREFIXED_COMMAND_CASES)
+def test_backchannel_prefixed_command_stays_tier1(router, utterance, tool):
+    d = router.classify(utterance)
+    assert d.tier == 1
+    assert d.tool == tool
 
 
 def test_decision_parse_fallback_is_tier2():
