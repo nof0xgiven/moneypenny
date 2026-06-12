@@ -367,13 +367,20 @@ the live session):
    pip bindings are dead on py3.12/arm64 — recon evidence in the module
    docstring and `spikes/aec_probe.py`). The output callback's own PCM is
    the far-end reference (we generate the leak, so the reference is exact),
-   paired positionally with mic frames through a small FIFO ring. Two live
-   findings worth remembering: sounddevice's default "high" input latency
+   paired positionally with mic frames through a small FIFO ring, anchored
+   by PortAudio's hardware timestamps. Three live findings worth
+   remembering: sounddevice's default "high" input latency
    let CoreAudio buffer the mic ~850ms, pushing the echo outside any
    realistic filter window (fixed with `latency="low"`, ~12ms in/~25ms out);
-   and MLX workers holding the GIL in ~60ms chunks make the PortAudio
+   MLX workers holding the GIL in ~60ms chunks make the PortAudio
    callbacks fire in bursts, which positional pairing tolerates (pinned by
-   `test_audioio_pairing_survives_bursty_callback_order`). Measured:
+   `test_audioio_pairing_survives_bursty_callback_order`); and CoreAudio
+   can silently lose mic samples during CPU spikes (measured: a 148ms adc
+   jump with no overflow flag), after which blind positional pairing is
+   permanently acausal and the canceller never converges again — the ring
+   therefore anchors the dac→adc skew of a healthy pairing and drops stale
+   reference frames when the skew jumps (counted in `ref_slips`, pinned by
+   `test_audioio_reanchors_after_mic_side_sample_loss`). Measured:
    synthetic ERLE 33.9dB converged (19.6dB linear filter alone), double-talk
    near-speech correlation 0.973, 0.44ms per 80ms frame on the input
    callback thread; acoustically 19–26dB suppression with the residual

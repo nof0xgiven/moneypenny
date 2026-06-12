@@ -14,6 +14,7 @@ __enter__, which these tests never call).
 from __future__ import annotations
 
 import queue
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -247,6 +248,57 @@ def test_audioio_ref_ring_is_bounded():
         audio.speaker_frames.put_nowait(np.zeros(FRAME, dtype=np.float32))
         audio._on_output(out_buf, FRAME, None, None)
     assert len(audio._ref_ring) <= 8
+
+
+def test_audioio_reanchors_after_mic_side_sample_loss():
+    """The live failure mode (tmp dump, 2026-06-12 session): during an engine
+    warm-up CPU spike CoreAudio silently dropped ~2 frames of MIC samples (no
+    overflow flag) while the output stream kept playing. Blind positional
+    pairing then hands the canceller reference frames that played BEFORE the
+    mic frame's audio was captured -- acausal, so the MDF filter can never
+    cancel again (measured live: ~0-2dB suppression for the rest of the
+    session). With dac/adc timestamp anchoring, the stale reference frames
+    must be dropped (counted as slips) and ERLE must recover after the slip.
+
+    Timestamps mirror the measured hardware: both PortAudio streams share one
+    host-clock epoch; out latency ~25ms, in latency ~12ms.
+    """
+    n_frames = 75
+    far = speechish(n_frames * FRAME, seed=10)
+    echo = echo_of(far)
+    # the mic never digitized frames 30-31: splice them OUT of the echo
+    # stream (content shifts earlier; this is sample loss, not silence)
+    cut = np.concatenate([echo[:30 * FRAME], echo[32 * FRAME:]])
+    n_in = len(cut) // FRAME
+
+    audio = AudioIO(aec=EchoCanceller())
+    out_buf = np.zeros((FRAME, 1), dtype=np.float32)
+    frame_s = FRAME / SAMPLE_RATE
+
+    def out_t(k: int):  # k-th output callback: frame hits the DAC 25ms later
+        return SimpleNamespace(outputBufferDacTime=1000.0 + k * frame_s + 0.025)
+
+    def in_t(j: int):  # j-th input callback: capture of 80ms ending 12ms ago
+        k = j if j < 30 else j + 2  # post-loss content was captured 2 frames later
+        return SimpleNamespace(inputBufferAdcTime=1000.0 + k * frame_s - 0.012 - frame_s)
+
+    j = 0
+    for k in range(n_frames):
+        audio.speaker_frames.put_nowait(far[k * FRAME:(k + 1) * FRAME])
+        audio._on_output(out_buf, FRAME, out_t(k), None)
+        # input misses its tick twice while the output keeps going (the stall)
+        if k in (30, 31):
+            continue
+        if j < n_in:
+            audio._on_input(_in_buf(cut[j * FRAME:(j + 1) * FRAME]), FRAME, in_t(j), None)
+            j += 1
+
+    got = np.concatenate(_drain(audio.mic_frames))
+    # well after the slip (>=1.8s of re-convergence): echo must be cancelled again
+    tail = slice(53 * FRAME, n_in * FRAME)
+    erle = _db(np.mean(cut[tail] ** 2), np.mean(got[tail] ** 2))
+    assert erle > 10.0, f"post-slip ERLE {erle:.1f}dB (canceller never re-anchored)"
+    assert audio.ref_slips == 2, f"expected 2 stale refs dropped, got {audio.ref_slips}"
 
 
 # --- real-fixture replay (the probe scenario, real TTS speech) ---

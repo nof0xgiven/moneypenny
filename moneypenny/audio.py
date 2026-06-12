@@ -21,6 +21,21 @@ process() exactly once, in order (moneypenny/aec.py docstring). The deque
 only drops (oldest first) if the input stream stalls outright, which already
 desyncs the streams more than the drop does; the 400ms filter re-converges.
 
+Timestamp anchoring on top of the FIFO: blind positional pairing assumes
+neither hardware stream ever loses samples. Measured live (2026-06-12, RØDE
++ engine warm-up CPU spike), CoreAudio dropped ~2 frames of MIC samples with
+NO overflow flag while the output kept playing; from then on every reference
+frame the FIFO handed the canceller had played BEFORE the paired mic frame
+was captured -- acausal, unrecoverable, echo passed through for the rest of
+the session. PortAudio's hardware timestamps expose the loss: the dac->adc
+skew of a healthy pairing is constant (callback EXECUTION may run late under
+MLX GIL bursts, but hardware time does not lie), so a jump beyond half a
+frame marks a real stream slip. The pairing then drops stale reference
+frames (counted in ref_slips) until the skew re-anchors, and hands zeros
+when the reference is in the mic frame's future (DAC gap: zeros really were
+played). Callbacks driven without timestamps (unit tests, hosts that supply
+none) fall back to the plain FIFO.
+
 AEC cost on the input-callback thread is ~0.4ms per 80ms frame (measured:
 tests/test_aec.py::test_per_frame_cost_within_callback_budget), invisible
 next to the budget. Streams are opened in __enter__, not __init__, so the
@@ -43,6 +58,9 @@ if TYPE_CHECKING:
 SAMPLE_RATE = 24000
 FRAME = 1920
 REF_RING_FRAMES = 8
+# Skew deviation beyond this marks a genuine stream slip (real hardware
+# timestamps jitter by ~ms; sample loss shifts them by whole frames).
+SLIP_THRESHOLD_S = 0.04
 
 
 class AudioIO:
@@ -56,20 +74,60 @@ class AudioIO:
         # races another writer); the status line on the loop thread only
         # reads, and a momentarily stale read is fine for a diagnostic.
         self.underruns = 0
+        # Reference-pairing slips: stale reference frames dropped after a
+        # hardware stream lost samples (see module docstring). A burst of
+        # growth marks a slip event; the canceller re-converges after it.
+        self.ref_slips = 0
         # AEC state (None = pass-through). AudioIO owns the canceller once
         # handed in: __exit__ closes it after the streams stop.
         self._aec = aec
-        self._ref_ring: "collections.deque[np.ndarray]" = collections.deque(maxlen=REF_RING_FRAMES)
+        # ring of (dac_time | None, played frame); dac_time None when the
+        # host supplies no timestamp (plain-FIFO fallback pairing)
+        self._ref_ring: "collections.deque[tuple[float | None, np.ndarray]]" = (
+            collections.deque(maxlen=REF_RING_FRAMES)
+        )
         self._ref_lock = threading.Lock()
+        self._ref_skew: float | None = None  # anchored adc-dac of a healthy pairing
         self._ref_silence = np.zeros(FRAME, dtype=np.float32)
         self._in: sd.InputStream | None = None
         self._out: sd.OutputStream | None = None
 
+    def _pop_ref(self, adc: float) -> np.ndarray:
+        """Choose this mic frame's far-end reference. Caller holds _ref_lock."""
+        if not self._ref_ring:
+            return self._ref_silence
+        dac = self._ref_ring[0][0]
+        if not adc or dac is None:
+            return self._ref_ring.popleft()[1]  # no timestamps: positional FIFO
+        if self._ref_skew is None:
+            self._ref_skew = adc - dac  # anchor on the first timestamped pairing
+        # drop references that played too long before this mic audio was
+        # captured (the mic stream lost samples; pairing them is acausal)
+        while self._ref_ring and self._ref_ring[0][0] is not None \
+                and adc - self._ref_ring[0][0] > self._ref_skew + SLIP_THRESHOLD_S:
+            self._ref_ring.popleft()
+            self.ref_slips += 1
+        if not self._ref_ring:
+            return self._ref_silence
+        dac = self._ref_ring[0][0]
+        if dac is None or abs((adc - dac) - self._ref_skew) <= SLIP_THRESHOLD_S:
+            return self._ref_ring.popleft()[1]
+        # head is in this mic frame's future. Normally a transient (DAC gap:
+        # zeros really were played; keep the frame for its later mic frame),
+        # but a full ring means the output timeline itself jumped -- re-anchor
+        # on the head and take the re-convergence hit.
+        if len(self._ref_ring) == self._ref_ring.maxlen:
+            self._ref_skew = adc - dac
+            self.ref_slips += 1
+            return self._ref_ring.popleft()[1]
+        return self._ref_silence
+
     def _on_input(self, in_data, frames, timing, status) -> None:
         mic = in_data[:, 0].astype(np.float32).copy()
         if self._aec is not None:
+            adc = float(getattr(timing, "inputBufferAdcTime", 0.0) or 0.0) if timing else 0.0
             with self._ref_lock:
-                ref = self._ref_ring.popleft() if self._ref_ring else self._ref_silence
+                ref = self._pop_ref(adc)
             mic = self._aec.process(mic, ref)
         self.mic_frames.put_nowait(mic)
 
@@ -82,9 +140,10 @@ class AudioIO:
         if self._aec is not None:
             # what was ACTUALLY played -- real frame or underrun zeros -- is
             # the far-end reference; both must enter the stream (aec.py).
+            dac = float(getattr(timing, "outputBufferDacTime", 0.0) or 0.0) if timing else 0.0
             played = out_data[:, 0].astype(np.float32).copy()
             with self._ref_lock:
-                self._ref_ring.append(played)
+                self._ref_ring.append((dac if dac else None, played))
 
     def __enter__(self) -> "AudioIO":
         # latency="low": sounddevice's default ("high") let CoreAudio buffer
