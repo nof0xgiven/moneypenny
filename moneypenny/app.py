@@ -83,13 +83,12 @@ tone. Residual risk: fps can still dip below 12.5 during speech if the ASR
 call exceeds the step time (per-frame cost is max(asr, step) since the two
 overlap), but the dip is bounded and the queue drains in the following
 silence.
-Step budget (see decision 0002 known-limitation 6): the original ~183-213ms
-idle step was the import-affinity penalty (fixed here via deferred imports)
-plus synchronous mimi decode (fixed in engine.py via the one-frame decode
-pipeline); idle step is now ~70ms, inside the 80ms budget, so catch-up only
-fires after genuine stalls rather than perpetually (the system-prompt prime
-graph, formerly the big one — ~11s forced onto the first live frame after
-every reset — is now evaluated inside engine._prime, in load()/stop()).
+Step budget (see decision 0002 known-limitation 6): idle step is ~70ms,
+inside the 80ms budget — this depends on the deferred imports above (import
+affinity), engine.py's one-frame decode pipeline, and engine._prime
+evaluating the ~11s system-prompt prime graph inside load()/stop() rather
+than on a live frame. Catch-up therefore only fires after genuine stalls,
+not perpetually.
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real

@@ -248,14 +248,14 @@ class VoiceEngine:
         """Reset the LM streaming state, replay the system prompts, and FORCE
         the resulting MLX graph. step_system_prompts() builds one lazy
         transformer step per voice-prompt frame / system-prompt token (~500
-        steps here) and evaluates nothing; left lazy, the whole re-prime was
-        computed by the first step() that forces evaluation — i.e. the first
-        LIVE frame after every reset paid ~10.8s (measured, M3 Ultra): the
-        per-start stall of decision 0003 check 2. mx.eval here keeps that
-        cost inside __init__/reset_session(), which only ever run in load()
-        and stop() on the engine worker, off the live frame path. The eval
-        targets are the exact state the next step reads (token cache + every
-        layer's KV cache); their dependency closure is the entire re-prime."""
+        steps here) and evaluates nothing; whichever call forces evaluation
+        first pays the whole re-prime (~10.8s on an M3 Ultra — decision 0003
+        check 2). The mx.eval here pins that cost inside __init__ and
+        reset_session(), which only ever run in load() and stop() on the
+        engine worker, off the live frame path — a live step() must never be
+        the first to force it. The eval targets are the exact state the next
+        step reads (token cache + every layer's KV cache); their dependency
+        closure is the entire re-prime."""
         self._gen.reset_streaming()
         self._gen.step_system_prompts()
         state = [self._gen.cache, self._gen.provided]
