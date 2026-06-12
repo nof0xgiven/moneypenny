@@ -9,3 +9,4 @@ spikes/out/
 .DS_Store
 .cursor/
 docker-compose.yml
+tmp/
