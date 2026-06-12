@@ -68,3 +68,15 @@ def test_frame_constants():
     # protocol invariants (1920 samples = one 80ms Mimi step @ 24kHz), not tunables
     assert Config.SAMPLE_RATE == 24000
     assert Config.FRAME == 1920
+
+
+def test_echo_cancel_default_on(monkeypatch):
+    monkeypatch.delenv("ECHO_CANCEL", raising=False)
+    assert Config.from_env().echo_cancel is True
+
+
+def test_echo_cancel_kill_switch(monkeypatch):
+    monkeypatch.setenv("ECHO_CANCEL", "0")
+    assert Config.from_env().echo_cancel is False
+    monkeypatch.setenv("ECHO_CANCEL", "1")
+    assert Config.from_env().echo_cancel is True

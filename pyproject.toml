@@ -20,6 +20,12 @@ dependencies = [
     # fixed 3.14.1) plus the 3.13.3/3.13.4 DoS + CRLF fixes. The dashboard
     # binds 127.0.0.1 only, but it does serve websockets.
     "aiohttp>=3.14.1",
+    # Echo cancellation (moneypenny/aec.py) binds brew's libspeexdsp via
+    # ctypes - a runtime dylib (`brew install speexdsp`), NOT a pip dep, and
+    # optional (missing lib = AEC off, app still starts). Deliberate: pip
+    # `speexdsp` ships a Python-2-era SWIG proxy (dead on 3.12) and pip
+    # `webrtc-audio-processing` hardcodes ARM32 flags (recon:
+    # spikes/aec_probe.py + the aec.py docstring).
 ]
 
 [project.optional-dependencies]

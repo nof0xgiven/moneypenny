@@ -25,6 +25,10 @@ class Config:
     # above the ambient noise floor or the VAD never leaves "speech" (boundary
     # events stop firing and the ASR gate never closes).
     vad_rms_threshold: float = 0.01
+    # Acoustic echo cancellation on the mic path (speex; moneypenny/aec.py).
+    # Kill switch ECHO_CANCEL=0 for headphone setups or for isolating AEC in
+    # a debugging session; anything else (or unset) leaves it on.
+    echo_cancel: bool = True
 
     @property
     def homey_configured(self) -> bool:
@@ -47,4 +51,5 @@ class Config:
             voice=os.environ.get("MONEYPENNY_VOICE", "NATF2"),
             briefing_voice=os.environ.get("BRIEFING_VOICE", "am_michael"),
             vad_rms_threshold=float(os.environ.get("VAD_RMS_THRESHOLD", "0.01")),
+            echo_cancel=os.environ.get("ECHO_CANCEL", "1") != "0",
         )

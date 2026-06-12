@@ -109,6 +109,7 @@ from dotenv import load_dotenv
 # NOTE: moneypenny.engine / .asr / .router are deliberately NOT imported here.
 # They pull in the MLX stack, and the engine worker must be the first thread
 # to import it (see "Import affinity" in the module docstring).
+from moneypenny.aec import EchoCanceller
 from moneypenny.asr_gate import AsrGate
 from moneypenny.audio import AudioIO
 from moneypenny.briefing import compose
@@ -356,7 +357,20 @@ class Session:
 
             log.info("audio defaults: device=%s input=%s output=%s",
                      sd.default.device, _describe_device("input"), _describe_device("output"))
-            self._audio = AudioIO().__enter__()
+            aec = None
+            if self.cfg.echo_cancel:
+                try:
+                    aec = EchoCanceller()
+                    log.info("echo cancellation ON (speex on the mic path; ECHO_CANCEL=0 disables)")
+                except Exception:
+                    # never block startup on a missing dylib (degrade gracefully)
+                    log.exception(
+                        "echo cancellation DISABLED: EchoCanceller construction failed "
+                        "(brew install speexdsp?) - continuing without it"
+                    )
+            else:
+                log.info("echo cancellation OFF (ECHO_CANCEL=0)")
+            self._audio = AudioIO(aec=aec).__enter__()
             try:
                 self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
                 # Surface frame-loop crashes even when nobody awaits the task (the web

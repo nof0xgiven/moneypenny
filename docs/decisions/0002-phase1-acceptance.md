@@ -360,6 +360,32 @@ the live session):
    the energy-VAD threshold must sit above the room's noise floor (this room
    measured ~0.013–0.019 RMS ambient vs the 0.01 default) — tunable via
    `VAD_RMS_THRESHOLD` (smokes used 0.03).
+
+   **Headphone requirement largely lifted 2026-06-12 — acoustic echo
+   cancellation landed** (`moneypenny/aec.py`: speex MDF filter +
+   preprocessor residual suppression, ctypes against brew's libspeexdsp; the
+   pip bindings are dead on py3.12/arm64 — recon evidence in the module
+   docstring and `spikes/aec_probe.py`). The output callback's own PCM is
+   the far-end reference (we generate the leak, so the reference is exact),
+   paired positionally with mic frames through a small FIFO ring. Two live
+   findings worth remembering: sounddevice's default "high" input latency
+   let CoreAudio buffer the mic ~850ms, pushing the echo outside any
+   realistic filter window (fixed with `latency="low"`, ~12ms in/~25ms out);
+   and MLX workers holding the GIL in ~60ms chunks make the PortAudio
+   callbacks fire in bursts, which positional pairing tolerates (pinned by
+   `test_audioio_pairing_survives_bursty_callback_order`). Measured:
+   synthetic ERLE 33.9dB converged (19.6dB linear filter alone), double-talk
+   near-speech correlation 0.973, 0.44ms per 80ms frame on the input
+   callback thread; acoustically 19–26dB suppression with the residual
+   below this room's ambient floor, and the live app's greeting no longer
+   produces phantom routes (AEC-off control run reproduced the
+   owner's failure: phantom partials of the model's own words, routed).
+   Honest residuals: the first 1–2s of the model's first utterance can blip
+   VAD before the filter converges (empty/backchannel partials, absorbed by
+   the classification gate), and loud rooms can still leak fragments during
+   long model turns — headphones remain the cleanest capture.
+   `ECHO_CANCEL=0` disables; missing dylib degrades to pass-through with a
+   logged warning, never blocking startup.
 7. **Briefing drain vs. live mic:** while a briefing drains, the model hears the
    briefing audio but ASR/VAD still hear the real mic — user speech during a drain can
    queue a second briefing the model has no conversational antecedent for. Phase 2

@@ -15,11 +15,13 @@ The spec lives in `docs/moneypenny-spec.md`. Architecture decisions, with the sp
 - Apple Silicon Mac (MLX). Measured real time on an M3 Ultra: 12.5 fps, 64 ms per engine step.
 - Python 3.12
 - A local checkout of `personaplex-mlx`; weights for `nvidia/personaplex-7b-v1` download to your Hugging Face cache on first run
-- Headphones. There is no echo cancellation, and open speakers feed the model its own voice.
+- For open speakers: `brew install speexdsp`. Built-in echo cancellation cancels the model's voice out of the mic (measured 19-26 dB on this hardware, residual below room ambient once converged). Headphones still give the cleanest capture and need none of this; without the dylib the app starts normally and just runs without AEC.
 
 ## Setup
 
 ```bash
+brew install speexdsp  # echo cancellation for open-speaker setups (optional)
+
 python3.12 -m venv .venv
 source .venv/bin/activate
 
@@ -51,6 +53,8 @@ The slow tests run real inference. There are no mocked models anywhere in the su
 ## Run
 
 Copy `.env.example` to `.env`. `HOMEY_BASE_URL` and `HOMEY_API_KEY` are optional; without them the app starts with home control disabled and says so when asked to touch the lights. Set `VAD_RMS_THRESHOLD` above your room's noise floor (the status log prints `micRMS` so you can read it off).
+
+Speakers work: every frame the app plays is also the far-end reference for a speex echo canceller on the mic path, so the model stops hearing its own voice. Measured on this hardware: 19-26 dB of echo suppression, residual below room ambient within 2-3 seconds of the model speaking. The first second of the very first utterance can still blip the VAD before the filter converges; the classification gate absorbs that. Loud rooms with hot mics may still leak fragments during long model turns, so headphones remain the gold standard. `ECHO_CANCEL=0` turns the canceller off.
 
 ```bash
 .venv/bin/moneypenny

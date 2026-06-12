@@ -88,11 +88,12 @@ def test_release_claim_with_stale_generation_never_clobbers_newer_claim():
 class _FakeAudio:
     """Device-boundary stand-in: start() opens real audio; tests must not."""
 
-    def __init__(self) -> None:
+    def __init__(self, aec=None) -> None:
         self.mic_frames = queue.Queue()
         self.speaker_frames = queue.Queue()
         self.underruns = 0
         self.closes = 0
+        self.aec = aec
 
     def __enter__(self) -> "_FakeAudio":
         return self
