@@ -260,18 +260,38 @@ def test_audioio_reanchors_after_mic_side_sample_loss():
     session). With dac/adc timestamp anchoring, the stale reference frames
     must be dropped (counted as slips) and ERLE must recover after the slip.
 
+    For the ERLE assertion to DISCRIMINATE broken pairing from fixed, two
+    confounds must be designed out (review finding: with a speechish far
+    signal even blind FIFO pairing scored ~30dB here):
+      - the far signal must be aperiodic AND nonstationary -- a pitch-
+        periodic fixture self-aligns at the period, and a stationary noise
+        fixture gets eaten by the preprocessor's denoiser either way;
+      - the canceller runs preprocess=False -- the preprocessor suppresses
+        by spectral gain, which needs no waveform alignment and masks ~14dB
+        regardless of pairing. The linear MDF filter is the component whose
+        causality the anchoring protects, so it is what this test measures.
+    Measured on this scenario: blind FIFO 0.1dB (fails), anchored 29dB.
+
     Timestamps mirror the measured hardware: both PortAudio streams share one
     host-clock epoch; out latency ~25ms, in latency ~12ms.
     """
     n_frames = 75
-    far = speechish(n_frames * FRAME, seed=10)
+    # aperiodic + nonstationary: noise carrier under a deep random slow
+    # envelope; no period to self-align on, no stationary floor to denoise
+    rng = np.random.default_rng(10)
+    carrier = rng.standard_normal(n_frames * FRAME)
+    b, a = butter(2, 2.5 / (SAMPLE_RATE / 2))
+    env = lfilter(b, a, np.abs(rng.standard_normal(n_frames * FRAME)))
+    env -= env.min()
+    env /= env.max()
+    far = (0.15 * carrier * env ** 2).astype(np.float32)
     echo = echo_of(far)
     # the mic never digitized frames 30-31: splice them OUT of the echo
     # stream (content shifts earlier; this is sample loss, not silence)
     cut = np.concatenate([echo[:30 * FRAME], echo[32 * FRAME:]])
     n_in = len(cut) // FRAME
 
-    audio = AudioIO(aec=EchoCanceller())
+    audio = AudioIO(aec=EchoCanceller(preprocess=False))
     out_buf = np.zeros((FRAME, 1), dtype=np.float32)
     frame_s = FRAME / SAMPLE_RATE
 
