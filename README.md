@@ -1,5 +1,7 @@
 # Moneypenny
 
+![Moneypenny: real-time voice assistant. Real answers. Real actions.](docs/assets/hero.png)
+
 A voice assistant that runs on your Mac. A full-duplex speech model carries the conversation, and a toolchain feeds it facts through a synthetic earpiece.
 
 Full-duplex speech models hold a conversation well and invent facts badly. Moneypenny splits the job. PersonaPlex talks to you. A router (Qwen3, local) reads the live transcript from streaming ASR and fires tools for weather, Homey devices, and timers while you finish your sentence. Each tool result comes back as a terse spoken briefing, synthesized in a second voice and played into the model's audio input once the model stops speaking. The model works the facts into its reply in its own words. You hear one assistant. The briefing channel stays inaudible.
