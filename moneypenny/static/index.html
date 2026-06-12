@@ -250,6 +250,7 @@ main {
 .row.tool .txt    { color: var(--teal); }
 .row.tool.fail .txt { color: var(--red); }
 .row.tool.esc .txt  { color: var(--muted); }
+.row.tool.mut .txt  { color: var(--muted); }
 .row.briefing { font-size: 12px; }
 .row.briefing .txt { color: var(--teal); opacity: .75; }
 
@@ -375,6 +376,13 @@ function fmtTime(ts) {
 let connected    = false;
 let sessionState = null;   // "loading" | "ready" | "live" | "stopped" | "error"
 let pendingCmd   = null;   // cmd awaiting its ack; orb disabled meanwhile
+let ackTimer     = 0;      // watchdog: a lost ack must not wedge the orb
+const ACK_TIMEOUT_MS = 15000;
+
+function clearPending() {
+  pendingCmd = null;
+  clearTimeout(ackTimer);
+}
 
 const ORB = {
   loading: { label: "Loading…",           cls: "is-busy" },
@@ -404,6 +412,11 @@ orb.addEventListener("click", () => {
   if (pendingCmd || !connected) return;
   pendingCmd = sessionState === "live" ? "stop" : "start";
   ws.send(JSON.stringify({ cmd: pendingCmd }));
+  ackTimer = setTimeout(() => {
+    clearPending();
+    renderOrb();
+    toast("no response from server");
+  }, ACK_TIMEOUT_MS);
   renderOrb();
 });
 
@@ -415,7 +428,7 @@ function onSession(ev) {
 }
 
 function onAck(ev) {
-  if (ev.cmd === pendingCmd) pendingCmd = null;
+  if (ev.cmd === pendingCmd) clearPending();
   if (!ev.ok) toast(`${ev.cmd || "command"} failed: ${ev.error}`);
   renderOrb();
 }
@@ -434,7 +447,7 @@ function connect() {
   };
   ws.onclose = () => {
     connected = false;
-    pendingCmd = null;
+    clearPending();
     renderOrb();
     setTimeout(connect, backoffMs);
     backoffMs = Math.min(backoffMs * 2, 10000);
@@ -442,17 +455,22 @@ function connect() {
   ws.onmessage = (msg) => {
     let ev;
     try { ev = JSON.parse(msg.data); } catch { return; }
-    switch (ev.type) {
-      case "session":  onSession(ev); break;
-      case "ack":      onAck(ev); break;
-      case "audio":    wavePush(ev.mic_rms, ev.out_rms); break;
-      case "vad":      onVad(ev); break;
-      case "partial":  onPartial(ev); break;
-      case "route":    feedRoute(ev); break;
-      case "tool":     feedTool(ev); break;
-      case "briefing": feedBriefing(ev); break;
-      case "status":   onStatus(ev); break;
-      default: break;  // forward-compatible: ignore unknown event types
+    try {
+      switch (ev.type) {
+        case "session":  onSession(ev); break;
+        case "ack":      onAck(ev); break;
+        case "audio":    wavePush(ev.mic_rms, ev.out_rms); break;
+        case "vad":      onVad(ev); break;
+        case "partial":  onPartial(ev); break;
+        case "route":    feedRoute(ev); break;
+        case "tool":     feedTool(ev); break;
+        case "briefing": feedBriefing(ev); break;
+        case "status":   onStatus(ev); break;
+        default: break;  // forward-compatible: ignore unknown event types
+      }
+    } catch (err) {
+      // one malformed event must never take down the stream
+      console.warn("event handler failed", ev.type, err);
     }
   };
 }
@@ -482,6 +500,8 @@ let cssW = 0, cssH = 0;
 const scaleRms = (rms) => Math.sqrt(Math.min(Math.max(rms, 0), RMS_FULL) / RMS_FULL);
 
 function wavePush(micRms, outRms) {
+  // a NaN/undefined rms must never poison the easing state
+  if (!Number.isFinite(micRms) || !Number.isFinite(outRms)) return;
   micTarget = scaleRms(micRms);
   outTarget = scaleRms(outRms);
   lastAudioAt = performance.now();
@@ -633,7 +653,11 @@ function feedTool(ev) {
   if (ev.escalated !== undefined) {
     addRow("tool esc", ev.ts, [span("txt", `escalated to T${ev.escalated}`)]);
   } else if (ev.ok) {
-    addRow("tool", ev.ts, [span("txt", `BRIEFING: ${ev.briefing}`)]);
+    if (ev.briefing) {
+      addRow("tool", ev.ts, [span("txt", `BRIEFING: ${ev.briefing}`)]);
+    } else {
+      addRow("tool mut", ev.ts, [span("txt", "completed — no briefing")]);
+    }
   } else {
     addRow("tool fail", ev.ts, [span("txt", `tool failed — ${ev.transcript}`)]);
   }
