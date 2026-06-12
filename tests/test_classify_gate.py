@@ -46,6 +46,8 @@ def test_pure_backchannel_blocks(transcript):
     "lights off",
     "what's the weather",
     "stop the timer",
+    "set a timer for five minutes",
+    "uh I just wondered what the weather is",
     "Yeah, reviving your brain.",  # mid-sentence garbage: the router's job, not the gate's
 ])
 def test_one_content_word_defeats_backchannel(transcript):
@@ -128,6 +130,33 @@ def test_echo_window_expires():
     assert g.should_classify("zebra quartz banjo", 109.5) == (False, "self_echo")
     # same words, but the model said them >10s ago: no longer echo evidence
     assert g.should_classify("zebra quartz banjo", 110.5) == (True, "ok")
+
+
+def test_default_echo_window_is_four_seconds():
+    # The phantom transcribes ~200ms-2s after the model speaks; 4s covers the
+    # real path with margin while quartering the false-block surface a 10s
+    # window left on legitimate user speech.
+    g = ClassifyGate()
+    g.note_model_text("zebra quartz banjo", 100.0)
+    assert g.should_classify("zebra quartz banjo", 103.9) == (False, "self_echo")
+    assert g.should_classify("zebra quartz banjo", 104.5) == (True, "ok")
+
+
+def test_tool_keyword_escapes_self_echo():
+    """Reviewer case: the model itself just said "turn"/"lights", then the
+    user gives a real command built from the same words. Tool intent must
+    always reach the router — a falsely silenced command is worse than a
+    phantom the router can still refuse. (Scoped to self_echo: a duplicate
+    already reached the router once, so it still dedupes.)"""
+    g = ClassifyGate()
+    g.note_model_text("Sure, I can turn the lights off for you.", 100.0)
+    assert g.should_classify("yeah turn the lights off", 100.8) == (True, "ok")
+
+
+def test_tool_keyword_escape_covers_timer_echo():
+    g = ClassifyGate()
+    g.note_model_text("I can set a timer for five minutes if you like.", 50.0)
+    assert g.should_classify("set a timer for five minutes", 51.0) == (True, "ok")
 
 
 def test_echo_needs_two_content_tokens():

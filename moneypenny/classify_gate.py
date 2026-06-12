@@ -28,8 +28,10 @@ Four checks, cheapest first; the first hit wins (should_classify reasons):
               speech_start)
   self_echo   >= echo_overlap_threshold of the transcript's content tokens
               (stopwords = the backchannel set) appear in what the model
-              spoke during the last echo_window_s seconds, and there are at
-              least 2 content tokens to judge by
+              spoke during the last echo_window_s seconds, there are at
+              least 2 content tokens to judge by, and NO token is a
+              TOOL_KEYWORDS entry — apparent tool intent always reaches the
+              router
 
 Self-echo matching detail: the model's text stream mangles words ("I don
 havet that in front of me") and ASR mangles them differently again ("I
@@ -40,12 +42,15 @@ least _MIN_PREFIX_MATCH chars; each window word is consumable once per
 evaluation (multiset, so a repeated transcript word needs repeated model
 evidence).
 
-Known limitation (accepted): a user genuinely repeating the model's words
-within the window gets dropped, and a phantom mangled beyond the prefix
-rule (or sharing too few tokens, like the log's "I can't check that thing
-right now.") still gets through. Echo cancellation is the real fix; this is
-the cheap second layer that keeps the obvious phantoms away from the router
-and the tool host.
+Known limitations (accepted): a user genuinely repeating the model's words
+within the window gets dropped; a phantom mangled beyond the prefix rule
+(or sharing too few tokens, like the log's "I can't check that thing right
+now.") still gets through; and a phantom that happens to contain a tool
+keyword (the model saying "I'll turn the lights off now") passes to the
+router BY DESIGN — the router refusing a phantom beats the gate silencing a
+real command. Echo cancellation is the real fix; this is the cheap second
+layer that keeps the obvious phantoms away from the router and the tool
+host.
 """
 from __future__ import annotations
 
@@ -62,6 +67,17 @@ BACKCHANNEL_TOKENS = frozenset({
     "fine", "thanks", "thank", "you", "alright", "wow", "god", "my",
     "that's", "thats", "like", "so", "well", "i", "know", "see", "good",
     "great", "totally", "exactly",
+})
+
+# Tool-intent escape: if ANY token is one of these, self_echo never blocks —
+# a falsely silenced real command ("yeah turn the lights off" right after the
+# model used the same words) is worse than a phantom reaching the router,
+# which can still refuse it. Scoped to self_echo only: backchannel can't
+# contain these by construction (they're not filler tokens), and a duplicate
+# already reached the router once.
+TOOL_KEYWORDS = frozenset({
+    "timer", "lights", "light", "lamp", "weather", "degrees", "heat",
+    "dim", "turn", "switch",
 })
 
 # "dont"~"don", "havet"~"have", "channel"~"chan"; 1-2 char tokens must match
@@ -96,7 +112,10 @@ class ClassifyGate:
     has the full filter semantics). Single-threaded by design: lives on the
     frame-loop thread, which is the only caller of every method."""
 
-    def __init__(self, echo_window_s: float = 10.0,
+    # Window default: the leak transcribes ~200ms-2s after the model speaks;
+    # 4s covers that with margin while keeping the false-block surface on
+    # legitimate user speech small (10s quadrupled it for no real-path gain).
+    def __init__(self, echo_window_s: float = 4.0,
                  echo_overlap_threshold: float = 0.7) -> None:
         self._window_s = echo_window_s
         self._threshold = echo_overlap_threshold
@@ -127,7 +146,8 @@ class ClassifyGate:
         normalized = " ".join(toks)
         if normalized == self._last_allowed:
             return False, "duplicate"
-        if self._is_echo(toks, now):
+        tool_intent = any(t in TOOL_KEYWORDS for t in toks)
+        if not tool_intent and self._is_echo(toks, now):
             return False, "self_echo"
         self._last_allowed = normalized
         return True, "ok"

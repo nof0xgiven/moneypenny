@@ -251,6 +251,8 @@ main {
 .row.tool.fail .txt { color: var(--red); }
 .row.tool.esc .txt  { color: var(--muted); }
 .row.tool.mut .txt  { color: var(--muted); }
+.row.gate { font-size: 12px; }
+.row.gate .txt { color: var(--muted); }
 .row.briefing { font-size: 12px; }
 .row.briefing .txt { color: var(--teal); opacity: .75; }
 
@@ -462,6 +464,7 @@ function connect() {
         case "audio":    wavePush(ev.mic_rms, ev.out_rms); break;
         case "vad":      onVad(ev); break;
         case "partial":  onPartial(ev); break;
+        case "gate":     feedGate(ev); break;
         case "route":    feedRoute(ev); break;
         case "tool":     feedTool(ev); break;
         case "briefing": feedBriefing(ev); break;
@@ -632,6 +635,12 @@ function onVad(ev) {
     }
   }
   // maybe_end: keep streaming; nothing to show
+}
+
+// -- gate: classification suppressed before the route worker
+//    (filter semantics: moneypenny/classify_gate.py)
+function feedGate(ev) {
+  addRow("gate", ev.ts, [span("txt", `filtered: ${ev.blocked} — ${ev.transcript}`)]);
 }
 
 // -- routes: tier badge + transcript + tool chip + confidence
