@@ -53,43 +53,57 @@ One session produced five distinct failures:
 
 ## Bundle verification (2026-06-12, sandbox)
 
-Suites: fast `218 passed, 28 deselected` (4.9s); slow `28 passed, 218
-deselected` (113s), process exit 138 after the summary — the documented
-interpreter-shutdown artifact (decision 0002), not a failure.
+Suites: fast `218 passed, 28 deselected` (4.9s; second pass 5.5s); slow
+`28 passed, 218 deselected` (113s; second pass 128.6s), process exit 138
+after the summary — the documented interpreter-shutdown artifact (decision
+0002), not a failure.
 
 Live: `moneypenny-web`, sessions driven over `/ws`, fixtures played
 acoustically into the room with `afplay` through the Mac Studio Speakers.
+Two independent passes: the first across volumes 65-84, the second at
+volume 85 with five start/stop cycles against a single process.
 Caveat on the acoustic path: Kokoro-voice fixtures through chassis speakers
 are marginal for ASR at threshold 0.03 — 5 of 8 weather-question plays
-fragmented or garbled at the mic. The checks below are judged on what reached
-the router and what the system did with it.
+fragmented or garbled at the mic in the first pass. The second pass
+isolated the worst spot to the first ~1s of each play (suppression release
+through speech onsets); per-frame AGC-levelled fixtures (target frame RMS
+0.18) with the keyword ≥2s into the phrase got full sentences through. A
+human at the mic does not have this problem — the owner's original log
+transcribed whole garbled sentences. The checks below are judged on what
+reached the router and what the system did with it.
 
 | Check | Result | Evidence |
 |---|---|---|
-| 1. Greeting triggers no VAD | PASS | At volume 65/76: zero `vad` events through the greeting (mic peak 0.021–0.027, under the 0.03 threshold). At volume 84 the documented pre-convergence blip appeared: 1–2 fragments ("Anyway.", "Hello?") routed tier 0, the rest gate-blocked `backchannel`; zero tool actions. |
-| 2. No catch-up dump at session start | **FAIL** | Every first `start()` per process: `catch-up: dropped 122 silent mic frames (~9.8s of drift)` ~11s after "session live", first status `fps=2.0 step_ms=492`. A second `start()` in the same process is clean — the residual is once-per-process compile work the warm-up's `step(None)` path does not reach (real-PCM encode / first spoken output), ~490ms × ~25 frames. Warm-up itself works as far as it goes: first warm step 11.3s, settled 31ms, all inside `load()`. |
-| 3. Garbled weather ask → tier 1 → briefing → spoken facts | PARTIAL | Routing + pipeline PASS twice: "How's the weather looking?" and "Uh the weather looked." → tier 1 weather (conf 0.95), Open-Meteo briefing `WEATHER NOW 30C THUNDERSTORM WIND 1 KMH` queued 2938ms / 1067ms after the boundary, synthesized in ~470ms (4.8s audio), injected. Spoken uptake FAIL on both trajectories: one acknowledged-then-refused ("Thanks for letting me know. I can't see the weather"), one stayed silent after closing the conversation — plus two pre-briefing hallucinations ("It's sunny, mid 70s") when the ask never routed. Uptake is the pre-existing probabilistic risk (0001 risk 1, 0002 limitation 2), not part of this bundle. |
-| 4. Backchannel fixture blocked before routing | PASS | "Yeah. Okay cool. Yeah that's right." transcribed faithfully and produced four `gate` blocks (`backchannel` ×3, duplicate re-check ×1) and **zero** route calls. |
-| 5. "I don't mind the function honestly." → no phantom clarification | PASS (router path) | Transcribed "I don't mind the document/fact that honestly." → tier 0 chat (conf 0.95), twice. No tool route, no UNCLEAR briefing, no "say it again". The ToolHost restraint path was not exercised live (the router never misrouted it); it is pinned by `tests/test_toolhost.py`. |
-| 6. No phantom routes of the model's own speech | PASS | Across ~14 min of cumulative session time, every routed transcript traces to fixture playback or a pre-convergence greeting fragment; none match model speech outside that window. The one mid-reply leak ("Right." / "Yeah." during "I don't have that in front of me") was gate-blocked `backchannel`. `aecslips` ticked 0→6 across the loud-playback session with re-convergence each time; no echo runaway followed any slip. The `self_echo` filter itself never had to fire live (AEC + the cheaper filters caught everything first); its behavior is pinned by `tests/test_classify_gate.py`. |
+| 1. Greeting triggers no VAD | PASS | At volume 65/76: zero `vad` events through the greeting (mic peak 0.021–0.027, under the 0.03 threshold). At volume 84/85 the documented pre-convergence blip appeared: one blip utterance per session start, 1–2 fragments ("Anyway.", "Hello?", "Okay.", "Mm-hmm.") routed tier 0, the rest gate-blocked `backchannel`; zero tool actions in either pass. Post-convergence model speech held micRMS ≤0.028 with zero VAD events through full replies. |
+| 2. No catch-up dump at session start | **FAIL** | Every `start()`: `catch-up: dropped 121-129 silent mic frames (~9.7-10.3s of drift)` ~11s after "session live", first status `fps=2.0 step_ms=~490`, then locked to 12.5. Recurrence is per-start, not per-process: the second pass ran five start/stop cycles against one process and every start stalled identically (121-123 frames), as did both starts of the first pass's two-session process. That rules out once-per-process compile; the leading candidate is start()-scoped state the warm-up never steps — `reset_session()`'s re-prime runs AFTER the 25 warm steps, so the first live frames after every reset (every stop/start) materialize it; the warm `step(None)` path also never touches real-PCM encode. Warm-up itself works as far as it goes: first warm step 11.3-13.3s, settled 29-37ms, all inside `load()`. |
+| 3. Garbled weather ask → tier 1 → briefing → spoken facts | PARTIAL | Routing + pipeline PASS three times: "How's the weather looking?", "Uh the weather looked.", and (second pass, garbled onset) "Everyone is wondering, what is the weather looking like today?" → tier 1 weather (conf 0.95), Open-Meteo briefing `WEATHER NOW 30C THUNDERSTORM WIND 1 KMH` queued 2938ms / 1067ms / 1099ms after the boundary, synthesized in ~470-503ms (4.8s audio), injected; a same-utterance second tier-1 route was correctly blocked by the execution claim. Spoken uptake: 1 of 3 trajectories — the second pass's model first hedged invented facts ("partly cloudy... around 70 degrees"), then corrected to the briefed ones ("the 30 C wind and thunder is normal today"); the first pass's two failed (one acknowledged-then-refused — "Thanks for letting me know. I can't see the weather" — one stayed silent), plus two pre-briefing hallucinations ("It's sunny, mid 70s") when the ask never routed. Uptake is the pre-existing probabilistic risk (0001 risk 1, 0002 limitation 2), not part of this bundle. |
+| 4. Backchannel fixture blocked before routing | PASS | "Yeah. Okay cool. Yeah that's right." transcribed faithfully and produced four `gate` blocks (`backchannel` ×3, duplicate re-check ×1) and **zero** route calls; the second pass reproduced it ("Yeah." / "Yeah, that's right." → `backchannel` blocks, zero routes). |
+| 5. "I don't mind the function honestly." → no phantom clarification | PASS (router path) | Transcribed "I don't mind the document/fact that honestly." → tier 0 chat (conf 0.95), twice; second pass garbled it to "I don't mind that / the thing / the sound" → tier 0 (conf 0.95) all three. No tool route, no UNCLEAR briefing, no "say it again". The ToolHost restraint path was not exercised live (the router never misrouted it); it is pinned by `tests/test_toolhost.py` (timer and homey variants of the verbatim incident). |
+| 6. No phantom routes of the model's own speech | PASS | Across ~14 min of cumulative session time in the first pass and five sessions in the second, every routed transcript traces to fixture playback or a pre-convergence greeting fragment; none match model speech outside that window. The one mid-reply leak ("Right." / "Yeah." during "I don't have that in front of me") was gate-blocked `backchannel`. `aecslips` ticked 0→6 (first pass) and 1-5 per session (second pass) under near+far overlap, with re-convergence each time; no echo runaway followed any slip. The `self_echo` filter itself never had to fire live (AEC + the cheaper filters caught everything first); its behavior is pinned by `tests/test_classify_gate.py`. |
 
-Final status line before the clean stop:
+Final status lines before the clean stops — first pass:
 `micq=0 spkq=9 underruns=138 aecslips=6 vad=False asr_on=False fps=12.5
-asr_ms=0 step_ms=64` — underruns flat after the start-stall burst, fps at
-budget throughout.
+asr_ms=0 step_ms=64`; second pass:
+`micq=0 spkq=12 underruns=137 aecslips=2 micRMS=0.000965 vad=False
+asr_on=False fps=12.5 asr_ms=0 step_ms=66` — underruns flat after the
+start-stall burst, fps at budget throughout.
 
 ## Residual risks
 
-- **Once-per-process cold start (the Check 2 failure).** The first ~25 live
-  frames after the first `start()` still run ~490ms each, dumping ~10s of
-  silent mic frames in one warning. Bounded, silent-frames-only, absent on
-  restart — but the bundle's "no drift dump" claim is not met until warm-up
-  also exercises the real-PCM encode and first-speech paths.
+- **Per-start cold start (the Check 2 failure).** The first ~25 live frames
+  after EVERY `start()` run ~490ms each, dumping ~10s of silent mic frames in
+  one warning. Bounded and silent-frames-only, but it recurs on every
+  stop/start cycle — the bundle's "no drift dump" claim is not met until
+  warm-up also covers the start()-scoped paths (the post-reset re-prime and
+  real-PCM encode).
 - **Pre-convergence blip scales with speaker volume.** Quiet/moderate
   speakers: no blip. Loud speakers: 1–2 garbled fragments leak in the first
   seconds of the first utterance and route tier 0. The gate's filler list
   absorbs most fragments but not all ASR renderings ("Mm-hmm." normalizes to
-  `mmhmm`, "Hey.", "Anyway." — each costs one harmless router call).
+  `mmhmm`, "Hey.", "Anyway." — each costs one harmless router call). The
+  gate only protects the router: the model itself still hears the leak
+  (full-duplex) and may answer it conversationally ("Can I get your name and
+  number?" to a leaked "Okay.").
 - **Slip re-convergence.** Each `aecslips` event implies a couple of seconds
   of degraded cancellation while the filter re-anchors; under sustained CPU
   spikes during model speech this window can still leak fragments.
