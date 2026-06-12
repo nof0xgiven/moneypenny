@@ -160,12 +160,12 @@ async def test_two_ws_clients_both_receive_events():
 
 
 async def test_client_vanishing_mid_command_is_not_a_server_error(caplog):
-    """Found by the live e2e probe: session.stop() can outlive an impatient
-    client (engine reset takes seconds). Acking into the closed transport must
-    end the handler quietly, not as an aiohttp.server ERROR traceback.
+    """Contract: a client that disconnects between sending a command and
+    receiving the ack (session.stop() takes seconds while the engine resets)
+    must end the handler quietly, never as an aiohttp.server ERROR traceback.
 
-    Uses the real serve() path (AppRunner/TCPSite): TestServer's in-suite
-    transport teardown did NOT reproduce the failure, the real socket does."""
+    Uses the real serve() path (AppRunner/TCPSite) because TestServer's
+    in-suite transport teardown skips the socket close that triggers it."""
     entered = asyncio.Event()
     release = asyncio.Event()
 

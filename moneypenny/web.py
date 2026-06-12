@@ -55,8 +55,9 @@ async def _pump_events(ws: web.WebSocketResponse, q: asyncio.Queue) -> None:
 async def _send_ack(ws: web.WebSocketResponse, ack: dict) -> None:
     """A command can outlive an impatient client (session.stop() takes seconds
     while the engine resets); acking the now-dead socket is normal, not an
-    error. Caught here so it can never crash the handler with an
-    aiohttp.server traceback (regression: tests/test_web.py vanishing client)."""
+    error. aiohttp raises RuntimeError (closed) or ConnectionResetError
+    (closing) from send_json - both are caught so a dead client can never
+    crash the handler."""
     try:
         await ws.send_json(ack)
     except (RuntimeError, ConnectionResetError) as exc:
