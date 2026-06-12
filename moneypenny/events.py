@@ -19,6 +19,10 @@ Event types emitted by the Session (data keys beyond type/ts):
             "confidence": float}                           route worker
   tool     after a Tier-1 execution attempt:
              {"ok": bool, "briefing": str|None, "transcript": str}
+           or, when ToolHost dropped the route without acting (arg-validation
+           failed with no tool evidence in the transcript, or unknown tool):
+             {"ok": True, "briefing": None, "dropped": True,
+              "tool": str|None, "transcript": str}
            or, for a tier-2/3 escalation (no execution):
              {"ok": False, "escalated": int, "transcript": str}
   briefing {"stage": "synthesized", "ms": float, "audio_s": float}

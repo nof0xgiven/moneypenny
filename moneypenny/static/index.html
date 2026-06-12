@@ -661,6 +661,8 @@ function feedRoute(ev) {
 function feedTool(ev) {
   if (ev.escalated !== undefined) {
     addRow("tool esc", ev.ts, [span("txt", `escalated to T${ev.escalated}`)]);
+  } else if (ev.dropped) {
+    addRow("tool mut", ev.ts, [span("txt", `dropped spurious ${ev.tool ?? "?"} route — ${ev.transcript}`)]);
   } else if (ev.ok) {
     if (ev.briefing) {
       addRow("tool", ev.ts, [span("txt", `BRIEFING: ${ev.briefing}`)]);

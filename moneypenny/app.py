@@ -430,13 +430,20 @@ class Session:
                 if decision.tier == 1 and gen == utt.gen and utt.executed_gen != gen:
                     utt.executed_gen = gen  # claim before executing: never run a tool twice
                     try:
-                        briefing = host.execute(decision)  # action > narration
+                        briefing = host.execute(decision, transcript)  # action > narration
                         executed_ok = True
                     except Exception:
                         log.exception("tool execution failed for %r", transcript)
                         briefing = compose("briefing", "TOOL FAILED TELL USER YOU HIT A SNAG")
                         executed_ok = False
-                    bus.emit("tool", ok=executed_ok, briefing=briefing, transcript=transcript)
+                    if executed_ok and briefing is None:
+                        # ToolHost dropped the route (spurious arg-failure or
+                        # unknown tool): nothing ran, nothing will be spoken -
+                        # don't let the feed read "completed".
+                        bus.emit("tool", ok=True, briefing=None, dropped=True,
+                                 tool=decision.tool, transcript=transcript)
+                    else:
+                        bus.emit("tool", ok=executed_ok, briefing=briefing, transcript=transcript)
                     if briefing:
                         injections.put(briefing)
                         log.info("briefing queued %.0fms after boundary: %r",

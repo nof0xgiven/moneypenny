@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -74,21 +75,24 @@ def test_homey_dispatch_passes_structured_args(host):
 
 def test_homey_missing_action_escalates_not_crashes(host):
     h, homey = host
-    out = h.execute(RouteDecision(1, "homey", {"device": "lamp"}, 0.9))
+    out = h.execute(RouteDecision(1, "homey", {"device": "lamp"}, 0.9),
+                    transcript="do something with the lamp")
     assert "UNCLEAR" in out
     assert homey.kwargs is None  # nothing executed
 
 
 def test_homey_non_string_device_escalates_not_crashes(host):
     h, homey = host
-    out = h.execute(RouteDecision(1, "homey", {"action": "turn_on", "device": 42}, 0.9))
+    out = h.execute(RouteDecision(1, "homey", {"action": "turn_on", "device": 42}, 0.9),
+                    transcript="turn on the whatsit")
     assert "UNCLEAR" in out
     assert homey.kwargs is None
 
 
 def test_homey_non_string_action_escalates_not_crashes(host):
     h, homey = host
-    out = h.execute(RouteDecision(1, "homey", {"action": ["turn_on"], "zone": "office"}, 0.9))
+    out = h.execute(RouteDecision(1, "homey", {"action": ["turn_on"], "zone": "office"}, 0.9),
+                    transcript="switch everything in the office")
     assert "UNCLEAR" in out
     assert homey.kwargs is None
 
@@ -96,7 +100,8 @@ def test_homey_non_string_action_escalates_not_crashes(host):
 def test_homey_non_string_capability_escalates_not_crashes(host):
     h, homey = host
     args = {"action": "set", "zone": "office", "capability": ["dim"], "value": 0.5}
-    out = h.execute(RouteDecision(1, "homey", args, 0.9))
+    out = h.execute(RouteDecision(1, "homey", args, 0.9),
+                    transcript="dim the office a bit")
     assert "UNCLEAR" in out
     assert homey.kwargs is None
 
@@ -104,7 +109,8 @@ def test_homey_non_string_capability_escalates_not_crashes(host):
 def test_homey_non_scalar_value_escalates_not_crashes(host):
     h, homey = host
     args = {"action": "set", "zone": "office", "capability": "dim", "value": {"level": 0.5}}
-    out = h.execute(RouteDecision(1, "homey", args, 0.9))
+    out = h.execute(RouteDecision(1, "homey", args, 0.9),
+                    transcript="set the office lights to about half")
     assert "UNCLEAR" in out
     assert homey.kwargs is None
 
@@ -123,11 +129,89 @@ async def test_timer_dispatch(host):
 
 def test_unparseable_timer_briefs_for_clarification(host):
     h, _ = host
-    out = h.execute(RouteDecision(1, "timer", {"duration": "a while"}, 0.9))
+    out = h.execute(RouteDecision(1, "timer", {"duration": "a while"}, 0.9),
+                    transcript="set a timer for a while")
     assert "UNCLEAR" in out
 
 
 def test_null_duration_does_not_crash(host):
     h, _ = host
-    out = h.execute(RouteDecision(1, "timer", {"duration": None}, 0.9))
+    out = h.execute(RouteDecision(1, "timer", {"duration": None}, 0.9),
+                    transcript="set a timer")
     assert "UNCLEAR" in out
+
+
+# --- clarification restraint: arg-failure briefings need transcript evidence
+#     (a tier-1 route whose args fail validation is more likely a router
+#     misroute than a real request; only ask back when the user plausibly
+#     asked at all)
+
+
+def test_spurious_timer_route_dropped_silently(host, caplog):
+    """The production incident verbatim: ASR garbled chat into a timer route."""
+    h, homey = host
+    args = {"duration": "function", "label": "function"}
+    with caplog.at_level(logging.WARNING):
+        out = h.execute(RouteDecision(1, "timer", args, 0.95),
+                        transcript="I don't mind the function")
+    assert out is None  # no "say it again?" about a timer nobody asked for
+    assert homey.kwargs is None
+    assert any("spurious timer route dropped" in r.message for r in caplog.records)
+
+
+def test_timer_evidence_keeps_clarification_for_real_garbled_request(host):
+    h, _ = host
+    out = h.execute(RouteDecision(1, "timer", {"duration": "elevenses"}, 0.9),
+                    transcript="set a timer for elevenses")
+    assert "UNCLEAR" in out  # user said "timer"; asking back is good UX
+
+
+def test_homey_missing_action_with_trigger_word_keeps_clarification(host):
+    h, homey = host
+    out = h.execute(RouteDecision(1, "homey", {"device": "thing"}, 0.9),
+                    transcript="turn on the thing in the corner")
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_homey_missing_action_without_evidence_dropped(host, caplog):
+    h, homey = host
+    with caplog.at_level(logging.WARNING):
+        out = h.execute(RouteDecision(1, "homey", {"device": "lamp"}, 0.9),
+                        transcript="that's what she said")
+    assert out is None
+    assert homey.kwargs is None
+    assert any("spurious homey route dropped" in r.message for r in caplog.records)
+
+
+def test_homey_extracted_device_word_in_transcript_counts_as_evidence(host):
+    # "kettle" is no global trigger word, but the router pulled it out of the
+    # transcript verbatim - the user really addressed the home.
+    h, homey = host
+    out = h.execute(RouteDecision(1, "homey", {"device": "kettle"}, 0.9),
+                    transcript="kettle off please")
+    assert "UNCLEAR" in out
+    assert homey.kwargs is None
+
+
+def test_no_transcript_drops_arg_failure_clarifications(host):
+    # transcript=None means no evidence is checkable: the documented default
+    # is to drop, never to ask the user to repeat something unwitnessed.
+    h, _ = host
+    out = h.execute(RouteDecision(1, "timer", {"duration": "a while"}, 0.9))
+    assert out is None
+
+
+def test_homey_not_set_up_briefing_is_unconditional():
+    # NOT SET UP / UNAVAILABLE are not arg-validation failures: the args were
+    # fine, the adapter is absent. They brief regardless of transcript.
+    loop = asyncio.new_event_loop()
+    try:
+        timers = TimerService(on_fire=lambda l: None, loop=loop)
+        h = ToolHost(Cfg(), None, timers)
+        args = {"action": "turn_off", "device": "desk lamp"}
+        out = h.execute(RouteDecision(1, "homey", args, 0.9),
+                        transcript="that's what she said")
+        assert "NOT SET UP" in out
+    finally:
+        loop.close()
