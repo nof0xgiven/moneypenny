@@ -63,11 +63,12 @@ Homey/timer commands need the full command present in the partial to classify
 Tier 1 at all, and escalation bias pushes truncated partials to Tier 2.
 
 Known Phase 1 limitation - speaker-queue latency ratchet: any engine-worker
-stall (formerly each inject() TTS, and the lazy system-prompt prime graph the
-first live frame after a reset was forced to evaluate - now paid by
-engine._prime inside load()/stop() before any frames flow) blocks stepping, then
-the frame loop catches up by stepping through the backlog faster than
-realtime, bursting the produced PCM into the unbounded speaker_frames queue.
+stall blocks stepping (the known heavy costs - briefing TTS and the lazy
+system-prompt prime graph - run off the live path: TTS on its own worker,
+the prime graph forced by engine._prime inside load()/stop() before any
+frames flow), then the frame loop catches up by stepping through the backlog
+faster than realtime, bursting the produced PCM into the unbounded
+speaker_frames queue.
 After catch-up, production and consumption both run at 12.5 fps again, so the
 queue depth gained during the stall never drains:
 every stall permanently adds its duration to mouth-to-ear latency for the
@@ -146,14 +147,13 @@ def _warm_up_engine(engine) -> tuple[float, float]:
     """Runs on the engine worker (thread affinity): step the cold engine so
     the step path's first-call costs (residual Metal kernel compiles, the
     decode pipeline's first mimi calls) are paid HERE, in load(), not in the
-    first live seconds of a session. The big cold-start cost — evaluating the
-    system-prompt prime graph, ~11s — is paid eagerly inside VoiceEngine
-    construction and reset_session() themselves since the decision-0003
-    check-2 fix (engine._prime forces the graph; it used to leak onto the
-    first live frame after EVERY start). The warm-up generates throwaway
-    model output (sine-silence in, PCM out, discarded); reset_session() then
-    re-primes the conversation state exactly as stop() does.
-    Returns (first_step_s, last_step_s)."""
+    first live seconds of a session. The dominant cold-start cost — evaluating
+    the system-prompt prime graph, ~11s — is paid eagerly inside VoiceEngine
+    construction and reset_session() themselves (engine._prime forces the
+    graph off the live path; see decision 0003 check 2 for the measurements).
+    The warm-up generates throwaway model output (sine-silence in, PCM out,
+    discarded); reset_session() then re-primes the conversation state exactly
+    as stop() does. Returns (first_step_s, last_step_s)."""
     first_s = last_s = 0.0
     for i in range(ENGINE_WARMUP_STEPS):
         t0 = time.perf_counter()

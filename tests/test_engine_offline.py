@@ -119,13 +119,14 @@ def test_decode_pipeline_reset_drops_pending_frame():
 
 @pytest.mark.slow
 def test_reset_session_leaves_engine_hot():
-    """reset_session() must pay the system-prompt re-prime itself — it runs
-    in load()/stop(), off the live path — instead of leaving the re-prime as
-    a pending lazy MLX graph for the first live frame to evaluate. Pre-fix,
-    step_system_prompts() built ~500 unevaluated transformer steps and the
-    first step() after EVERY reset forced them all (~10.8s measured, M3
-    Ultra): the per-start frame stall of decision 0003 check 2. Bounds are
-    deliberately loose (the bug signature was ~175x the step median)."""
+    """Contract: reset_session() pays the system-prompt re-prime itself — it
+    runs in load()/stop(), off the live path — and must never leave the
+    re-prime as a pending lazy MLX graph for the first live frame to
+    evaluate. step_system_prompts() builds ~500 unevaluated transformer
+    steps; without engine._prime forcing them, the first step() after every
+    reset evaluates them all (~10.8s on an M3 Ultra — decision 0003 check 2
+    carries the measurements). Bounds are deliberately loose: the failure
+    signature is ~175x the step median."""
     eng = VoiceEngine(system_prompt=FRONT_OF_HOUSE, seed=11)
     eng.reset_session()
     rng = np.random.default_rng(3)
