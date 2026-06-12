@@ -11,6 +11,16 @@ log, return None): never ask the user to repeat a request they never made.
 The adapter-absence briefings (NOT SET UP / UNAVAILABLE) are not
 arg-validation failures and stay unconditional.
 
+Evidence is trigger words ONLY. Router-extracted device/zone strings do not
+count: the router copies transcript words into those args, so a spurious
+route's args trivially appear verbatim (device="function" from "I don't mind
+the function") - copied-arg evidence is no evidence. Known limitation
+(accepted): a REAL garbled request whose transcript keeps no trigger word -
+ASR ate it, or the phrasing never had one ("kettle off please") - is dropped
+silently instead of clarified. The user's natural retry is the recovery
+path; a phantom "please repeat" about a request never made is the worse
+failure.
+
 Weather is the exception to "never raise": network failures from
 current_weather propagate to the caller; the app layer (moneypenny.app)
 catches and converts them to failure briefings.
@@ -37,6 +47,9 @@ _NO_HOMEY_BRIEFINGS = {
 
 # Words whose presence in the transcript counts as evidence the user really
 # addressed the tool. Matched whole-word against the lowercased transcript.
+# Kept aligned with the classify gate's TOOL_KEYWORDS escape (pinned by
+# tests/test_classify_gate.py): a word trusted here must never be
+# self-echo-blocked before it can reach the router.
 _TOOL_TRIGGERS = {
     "timer": frozenset({"timer", "timers", "remind", "reminder", "reminders",
                         "countdown", "alarm", "alarms"}),
@@ -44,29 +57,19 @@ _TOOL_TRIGGERS = {
                         "switch", "plug", "heat", "heating", "thermostat"}),
 }
 
-# Filler inside a router-extracted device/zone string ("thing in the corner");
-# finding these in the transcript evidences nothing.
-_STOPWORDS = frozenset({"the", "a", "an", "in", "on", "of", "to", "and", "my"})
-
 
 def _words(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
-def _has_intent_evidence(tool: str, args: dict, transcript: str | None) -> bool:
+def _has_intent_evidence(tool: str, transcript: str | None) -> bool:
     """Did the user plausibly ask for `tool` at all? True iff the transcript
-    contains a trigger word for the tool - or, for homey, a word of the
-    device/zone string the router extracted (a name appearing verbatim in the
-    transcript means the user did address the home, trigger word or not)."""
+    contains one of the tool's trigger words. Deliberately nothing else:
+    router-extracted args are copied FROM the transcript, so testing them
+    against it is circular (module docstring, copied-arg loophole)."""
     if not transcript:
         return False
-    triggers = set(_TOOL_TRIGGERS[tool])
-    if tool == "homey":
-        for key in ("device", "zone"):
-            v = args.get(key)
-            if isinstance(v, str):
-                triggers |= _words(v) - _STOPWORDS
-    return bool(_words(transcript) & triggers)
+    return bool(_words(transcript) & _TOOL_TRIGGERS[tool])
 
 
 class ToolHost:
@@ -113,7 +116,7 @@ class ToolHost:
                 and (value is None or isinstance(value, (bool, int, float, str)))
             )
             if not well_typed:
-                if not _has_intent_evidence("homey", args, transcript):
+                if not _has_intent_evidence("homey", transcript):
                     log.warning("spurious homey route dropped (no tool evidence "
                                 "in transcript): %r", transcript)
                     return None
@@ -130,7 +133,7 @@ class ToolHost:
             duration = decision.args.get("duration")
             seconds = parse_duration(duration)
             if seconds is None:
-                if not _has_intent_evidence("timer", decision.args, transcript):
+                if not _has_intent_evidence("timer", transcript):
                     log.warning("spurious timer route dropped (no tool evidence "
                                 "in transcript): %r", transcript)
                     return None

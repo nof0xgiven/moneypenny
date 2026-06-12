@@ -217,6 +217,16 @@ class UtteranceState:
         self.gen += 1
         self.classified_text = None
 
+    def release_claim(self, gen: int) -> None:
+        """Undo a claim that consumed no execution (ToolHost dropped the
+        route): a later re-classification of the SAME utterance (grown
+        transcript at utterance_end) must still be allowed to execute. Only
+        the claim's own generation is restored, so a stale release can never
+        clobber a newer utterance's claim - same compare discipline as the
+        claim itself, and the same GIL-atomic single-int reasoning."""
+        if self.executed_gen == gen:
+            self.executed_gen = -1
+
 
 class Session:
     """Owns the worker pools, the loaded models, and (while running) one live
@@ -438,8 +448,11 @@ class Session:
                         executed_ok = False
                     if executed_ok and briefing is None:
                         # ToolHost dropped the route (spurious arg-failure or
-                        # unknown tool): nothing ran, nothing will be spoken -
-                        # don't let the feed read "completed".
+                        # unknown tool): nothing ran, so give the claim back -
+                        # the utterance_end re-classification of this same
+                        # utterance must still be able to execute.
+                        utt.release_claim(gen)
+                        # ... and don't let the feed read "completed".
                         bus.emit("tool", ok=True, briefing=None, dropped=True,
                                  tool=decision.tool, transcript=transcript)
                     else:

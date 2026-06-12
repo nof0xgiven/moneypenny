@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from moneypenny.app import Session
+from moneypenny.app import Session, UtteranceState
 from moneypenny.classify_gate import ClassifyGate
 from moneypenny.config import Config
 from moneypenny.events import EventBus
@@ -58,6 +58,28 @@ async def test_start_tolerates_previously_crashed_task():
     with pytest.raises(RuntimeError, match="not loaded"):
         await s.start()
     assert s._loop_task is None  # crash debris cleaned up via the stop path
+
+
+# --- UtteranceState claim/release (the route worker's double-execute guard) ---
+
+
+def test_release_claim_reopens_execution_for_same_generation():
+    """A dropped spurious route must not consume the utterance's one
+    execution claim: the utterance_end re-classification of the SAME
+    utterance (grown transcript) still gets to execute."""
+    u = UtteranceState()
+    u.executed_gen = u.gen  # what classify_and_execute does before executing
+    u.release_claim(u.gen)  # ToolHost dropped the route: nothing ran
+    assert u.executed_gen == -1
+
+
+def test_release_claim_with_stale_generation_never_clobbers_newer_claim():
+    u = UtteranceState()
+    stale = u.gen
+    u.reset()  # next utterance began
+    u.executed_gen = u.gen  # the new utterance's claim
+    u.release_claim(stale)  # a late worker releasing its old claim
+    assert u.executed_gen == u.gen  # untouched
 
 
 # --- lifecycle serialization (start/stop must not interleave at awaits) ---

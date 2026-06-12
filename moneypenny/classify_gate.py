@@ -75,9 +75,17 @@ BACKCHANNEL_TOKENS = frozenset({
 # which can still refuse it. Scoped to self_echo only: backchannel can't
 # contain these by construction (they're not filler tokens), and a duplicate
 # already reached the router once.
+# Superset of ToolHost's restraint evidence tables (moneypenny.tools
+# _TOOL_TRIGGERS; alignment pinned by tests/test_classify_gate.py): a word
+# the restraint trusts as tool evidence must never be silenced here first.
+# weather/degrees are gate-only extras (weather takes no args, so the
+# restraint has no table for it).
 TOOL_KEYWORDS = frozenset({
-    "timer", "lights", "light", "lamp", "weather", "degrees", "heat",
-    "dim", "turn", "switch",
+    "timer", "timers", "remind", "reminder", "reminders", "countdown",
+    "alarm", "alarms",
+    "light", "lights", "lamp", "lamps", "dim", "turn", "switch", "plug",
+    "heat", "heating", "thermostat",
+    "weather", "degrees",
 })
 
 # "dont"~"don", "havet"~"have", "channel"~"chan"; 1-2 char tokens must match

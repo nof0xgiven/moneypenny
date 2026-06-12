@@ -9,7 +9,8 @@ tier 2 and can trigger tools.
 """
 import pytest
 
-from moneypenny.classify_gate import ClassifyGate
+from moneypenny.classify_gate import TOOL_KEYWORDS, ClassifyGate
+from moneypenny.tools import _TOOL_TRIGGERS
 
 # What the model actually spoke (its text streams from engine.step), and what
 # ASR then transcribed off the speaker leak ~200ms later.
@@ -157,6 +158,31 @@ def test_tool_keyword_escape_covers_timer_echo():
     g = ClassifyGate()
     g.note_model_text("I can set a timer for five minutes if you like.", 50.0)
     assert g.should_classify("set a timer for five minutes", 51.0) == (True, "ok")
+
+
+@pytest.mark.parametrize("model_text,transcript", [
+    ("Want me to remind you about the oven?", "remind me about the oven"),
+    ("I could set an alarm for seven.", "set an alarm for seven"),
+    ("The thermostat is at twenty two.", "thermostat at twenty two"),
+    ("Shall I start a countdown now?", "start a countdown now"),
+    ("The corner plug is still on.", "corner plug on"),
+    ("I turned the heating down earlier.", "heating down"),
+])
+def test_restraint_trigger_words_escape_self_echo(model_text, transcript):
+    """Review alignment: every word the ToolHost clarification restraint
+    counts as tool evidence must also escape self-echo here - otherwise the
+    gate silences exactly the utterances the restraint would trust."""
+    g = ClassifyGate()
+    g.note_model_text(model_text, 100.0)
+    assert g.should_classify(transcript, 100.5) == (True, "ok")
+
+
+def test_gate_keywords_cover_restraint_trigger_vocabulary():
+    """Pin the two vocabularies together: anything ToolHost accepts as tool
+    evidence (moneypenny.tools._TOOL_TRIGGERS) must be in the gate's escape
+    set, or a trusted command could be self-echo-blocked before routing."""
+    restraint_vocab = frozenset().union(*_TOOL_TRIGGERS.values())
+    assert restraint_vocab <= TOOL_KEYWORDS
 
 
 def test_echo_needs_two_content_tokens():

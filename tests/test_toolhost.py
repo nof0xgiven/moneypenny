@@ -184,14 +184,33 @@ def test_homey_missing_action_without_evidence_dropped(host, caplog):
     assert any("spurious homey route dropped" in r.message for r in caplog.records)
 
 
-def test_homey_extracted_device_word_in_transcript_counts_as_evidence(host):
-    # "kettle" is no global trigger word, but the router pulled it out of the
-    # transcript verbatim - the user really addressed the home.
+def test_homey_device_word_alone_is_not_evidence(host, caplog):
+    # Flipped by review: the router COPIES transcript words into device/zone
+    # args, so a copied arg appearing verbatim proves nothing (see the
+    # "function" test below for the failure that killed the rule). Evidence
+    # is trigger words only. Accepted cost: a real terse request like this
+    # one degrades to silence and the user's natural retry - a phantom
+    # "please repeat" is the worse failure.
     h, homey = host
-    out = h.execute(RouteDecision(1, "homey", {"device": "kettle"}, 0.9),
-                    transcript="kettle off please")
-    assert "UNCLEAR" in out
+    with caplog.at_level(logging.WARNING):
+        out = h.execute(RouteDecision(1, "homey", {"device": "kettle"}, 0.9),
+                        transcript="kettle off please")
+    assert out is None
     assert homey.kwargs is None
+    assert any("spurious homey route dropped" in r.message for r in caplog.records)
+
+
+def test_homey_copied_arg_words_are_not_evidence(host, caplog):
+    # The production failure shape, homey edition: the router invents
+    # device="function" out of a chat sentence, so the arg's words trivially
+    # appear verbatim in the transcript. That must not license a clarification.
+    h, homey = host
+    with caplog.at_level(logging.WARNING):
+        out = h.execute(RouteDecision(1, "homey", {"device": "function"}, 0.95),
+                        transcript="I don't mind the function")
+    assert out is None
+    assert homey.kwargs is None
+    assert any("spurious homey route dropped" in r.message for r in caplog.records)
 
 
 def test_no_transcript_drops_arg_failure_clarifications(host):
