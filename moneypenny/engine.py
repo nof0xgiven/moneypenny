@@ -109,8 +109,7 @@ class VoiceEngine:
         voice_dir = get_voice_prompt_dir(None, hf_repo)
         self._gen.load_voice_prompt_embeddings(resolve_voice_prompt(voice, None, voice_dir))
         self._gen.text_prompt_tokens = self._text_tokenizer.encode(wrap_with_system_tags(system_prompt))
-        self._gen.reset_streaming()
-        self._gen.step_system_prompts()
+        self._prime()
 
         # Two mimi instances, not one: rustymimi.Tokenizer is a single
         # RefCell-guarded object, so a decode_step on the decode pool while
@@ -245,13 +244,35 @@ class VoiceEngine:
             tokens = tokens.transpose(0, 2, 1)
         return tokens
 
+    def _prime(self) -> None:
+        """Reset the LM streaming state, replay the system prompts, and FORCE
+        the resulting MLX graph. step_system_prompts() builds one lazy
+        transformer step per voice-prompt frame / system-prompt token (~500
+        steps here) and evaluates nothing; left lazy, the whole re-prime was
+        computed by the first step() that forces evaluation — i.e. the first
+        LIVE frame after every reset paid ~10.8s (measured, M3 Ultra): the
+        per-start stall of decision 0003 check 2. mx.eval here keeps that
+        cost inside __init__/reset_session(), which only ever run in load()
+        and stop() on the engine worker, off the live frame path. The eval
+        targets are the exact state the next step reads (token cache + every
+        layer's KV cache); their dependency closure is the entire re-prime."""
+        self._gen.reset_streaming()
+        self._gen.step_system_prompts()
+        state = [self._gen.cache, self._gen.provided]
+        for layer_cache in self._gen.model.transformer_cache:
+            kv = layer_cache.self_attn
+            if kv.keys is not None:
+                state += [kv.keys, kv.values]
+        mx.eval(state)
+
     def reset_session(self) -> None:
-        """End-of-session: clear pending injection + gating state; re-prime the model."""
+        """End-of-session: clear pending injection + gating state; re-prime the model.
+        Synchronously pays the full re-prime compute (~12s: see _prime) — call
+        on the engine worker from load()/stop(), never from the frame loop."""
         self._pending_audio = None
         self._draining = False
         self._quiet_frames = 0
         self._inject_waited = 0
         self.last_gate_wait_frames = None
         self._reset_decode_pipeline()
-        self._gen.reset_streaming()
-        self._gen.step_system_prompts()
+        self._prime()

@@ -85,8 +85,9 @@ Step budget (see decision 0002 known-limitation 6): the original ~183-213ms
 idle step was the import-affinity penalty (fixed here via deferred imports)
 plus synchronous mimi decode (fixed in engine.py via the one-frame decode
 pipeline); idle step is now ~70ms, inside the 80ms budget, so catch-up only
-fires after genuine stalls rather than perpetually (cold-start kernel
-compilation, formerly the big one, now runs inside load()'s warm-up).
+fires after genuine stalls rather than perpetually (the system-prompt prime
+graph, formerly the big one — ~11s forced onto the first live frame after
+every reset — is now evaluated inside engine._prime, in load()/stop()).
 
 Known Phase 1 limitation - briefing drain vs. live mic: while a briefing
 drains, the model hears the briefing audio but ASR/VAD still hear the real
@@ -137,17 +138,21 @@ def _load_engine(cfg: Config):
     )
 
 
-ENGINE_WARMUP_STEPS = 25  # ~2s of throwaway frames: covers Metal kernel compilation
+ENGINE_WARMUP_STEPS = 25  # ~2s of throwaway frames: covers step-path first-call costs
 
 
 def _warm_up_engine(engine) -> tuple[float, float]:
     """Runs on the engine worker (thread affinity): step the cold engine so
-    Metal kernel compilation is paid HERE, in load(), not in the first live
-    seconds of a session (measured live: first steps ~630ms -> fps 1.5 -> 13s
-    of mic drift dropped by catch-up and a choppy greeting). The warm-up
-    generates throwaway model output (sine-silence in, PCM out, discarded);
-    reset_session() then re-primes the conversation state exactly as stop()
-    does - kernels stay compiled. Returns (first_step_s, last_step_s)."""
+    the step path's first-call costs (residual Metal kernel compiles, the
+    decode pipeline's first mimi calls) are paid HERE, in load(), not in the
+    first live seconds of a session. The big cold-start cost — evaluating the
+    system-prompt prime graph, ~11s — is paid eagerly inside VoiceEngine
+    construction and reset_session() themselves since the decision-0003
+    check-2 fix (engine._prime forces the graph; it used to leak onto the
+    first live frame after EVERY start). The warm-up generates throwaway
+    model output (sine-silence in, PCM out, discarded); reset_session() then
+    re-primes the conversation state exactly as stop() does.
+    Returns (first_step_s, last_step_s)."""
     first_s = last_s = 0.0
     for i in range(ENGINE_WARMUP_STEPS):
         t0 = time.perf_counter()

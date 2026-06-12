@@ -5,6 +5,7 @@ Stochasticity note: seeded generation with temp 0.7/0.8 - a sampler or weights
 change can flip assertions. That is the point of a regression harness; if it
 fails after an upstream change, listen to the WAV before blaming the test."""
 import concurrent.futures
+import time
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +115,35 @@ def test_decode_pipeline_reset_drops_pending_frame():
     eng._reset_decode_pipeline()
     # post-reset the pipeline primes again: the undelivered frame is dropped
     assert eng._pipeline_decode(toks[1]) is None
+
+
+@pytest.mark.slow
+def test_reset_session_leaves_engine_hot():
+    """reset_session() must pay the system-prompt re-prime itself — it runs
+    in load()/stop(), off the live path — instead of leaving the re-prime as
+    a pending lazy MLX graph for the first live frame to evaluate. Pre-fix,
+    step_system_prompts() built ~500 unevaluated transformer steps and the
+    first step() after EVERY reset forced them all (~10.8s measured, M3
+    Ultra): the per-start frame stall of decision 0003 check 2. Bounds are
+    deliberately loose (the bug signature was ~175x the step median)."""
+    eng = VoiceEngine(system_prompt=FRONT_OF_HOUSE, seed=11)
+    eng.reset_session()
+    rng = np.random.default_rng(3)
+    times = []
+    for _ in range(11):
+        frame = (rng.standard_normal(FRAME) * 0.01).astype(np.float32)
+        t0 = time.perf_counter()
+        eng.step(frame)
+        times.append(time.perf_counter() - t0)
+    first, rest = times[0], sorted(times[1:])
+    median = rest[len(rest) // 2]
+    print(f"\nfirst step after reset: {first * 1000:.0f}ms, "
+          f"median of next 10: {median * 1000:.0f}ms")
+    assert first < 2.0 and first < 10 * median, (
+        f"first step after reset_session ran cold: {first * 1000:.0f}ms "
+        f"(median of next 10: {median * 1000:.0f}ms) - the re-prime graph "
+        f"leaked onto the live frame path again"
+    )
 
 
 @pytest.mark.slow

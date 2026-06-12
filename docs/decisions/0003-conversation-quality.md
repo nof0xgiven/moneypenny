@@ -75,7 +75,7 @@ reached the router and what the system did with it.
 | Check | Result | Evidence |
 |---|---|---|
 | 1. Greeting triggers no VAD | PASS | At volume 65/76: zero `vad` events through the greeting (mic peak 0.021–0.027, under the 0.03 threshold). At volume 84/85 the documented pre-convergence blip appeared: one blip utterance per session start, 1–2 fragments ("Anyway.", "Hello?", "Okay.", "Mm-hmm.") routed tier 0, the rest gate-blocked `backchannel`; zero tool actions in either pass. Post-convergence model speech held micRMS ≤0.028 with zero VAD events through full replies. |
-| 2. No catch-up dump at session start | **FAIL** | Every `start()`: `catch-up: dropped 121-129 silent mic frames (~9.7-10.3s of drift)` ~11s after "session live", first status `fps=2.0 step_ms=~490`, then locked to 12.5. Recurrence is per-start, not per-process: the second pass ran five start/stop cycles against one process and every start stalled identically (121-123 frames), as did both starts of the first pass's two-session process. That rules out once-per-process compile; the leading candidate is start()-scoped state the warm-up never steps — `reset_session()`'s re-prime runs AFTER the 25 warm steps, so the first live frames after every reset (every stop/start) materialize it; the warm `step(None)` path also never touches real-PCM encode. Warm-up itself works as far as it goes: first warm step 11.3-13.3s, settled 29-37ms, all inside `load()`. |
+| 2. No catch-up dump at session start | **FAIL** (resolved same day — see "Check 2 resolution" below) | Every `start()`: `catch-up: dropped 121-129 silent mic frames (~9.7-10.3s of drift)` ~11s after "session live", first status `fps=2.0 step_ms=~490`, then locked to 12.5. Recurrence is per-start, not per-process: the second pass ran five start/stop cycles against one process and every start stalled identically (121-123 frames), as did both starts of the first pass's two-session process. That rules out once-per-process compile; the leading candidate is start()-scoped state the warm-up never steps — `reset_session()`'s re-prime runs AFTER the 25 warm steps, so the first live frames after every reset (every stop/start) materialize it; the warm `step(None)` path also never touches real-PCM encode. Warm-up itself works as far as it goes: first warm step 11.3-13.3s, settled 29-37ms, all inside `load()`. |
 | 3. Garbled weather ask → tier 1 → briefing → spoken facts | PARTIAL | Routing + pipeline PASS three times: "How's the weather looking?", "Uh the weather looked.", and (second pass, garbled onset) "Everyone is wondering, what is the weather looking like today?" → tier 1 weather (conf 0.95), Open-Meteo briefing `WEATHER NOW 30C THUNDERSTORM WIND 1 KMH` queued 2938ms / 1067ms / 1099ms after the boundary, synthesized in ~470-503ms (4.8s audio), injected; a same-utterance second tier-1 route was correctly blocked by the execution claim. Spoken uptake: 1 of 3 trajectories — the second pass's model first hedged invented facts ("partly cloudy... around 70 degrees"), then corrected to the briefed ones ("the 30 C wind and thunder is normal today"); the first pass's two failed (one acknowledged-then-refused — "Thanks for letting me know. I can't see the weather" — one stayed silent), plus two pre-briefing hallucinations ("It's sunny, mid 70s") when the ask never routed. Uptake is the pre-existing probabilistic risk (0001 risk 1, 0002 limitation 2), not part of this bundle. |
 | 4. Backchannel fixture blocked before routing | PASS | "Yeah. Okay cool. Yeah that's right." transcribed faithfully and produced four `gate` blocks (`backchannel` ×3, duplicate re-check ×1) and **zero** route calls; the second pass reproduced it ("Yeah." / "Yeah, that's right." → `backchannel` blocks, zero routes). |
 | 5. "I don't mind the function honestly." → no phantom clarification | PASS (router path) | Transcribed "I don't mind the document/fact that honestly." → tier 0 chat (conf 0.95), twice; second pass garbled it to "I don't mind that / the thing / the sound" → tier 0 (conf 0.95) all three. No tool route, no UNCLEAR briefing, no "say it again". The ToolHost restraint path was not exercised live (the router never misrouted it); it is pinned by `tests/test_toolhost.py` (timer and homey variants of the verbatim incident). |
@@ -88,14 +88,73 @@ asr_ms=0 step_ms=64`; second pass:
 asr_on=False fps=12.5 asr_ms=0 step_ms=66` — underruns flat after the
 start-stall burst, fps at budget throughout.
 
+## Check 2 resolution (2026-06-12, same day): the unevaluated re-prime graph
+
+Measured with `tmp/start_stall_probe.py`: a real `Session.load()`, then —
+without audio devices — 3 cycles of `reset_session()` + 30 timed
+`engine.step(noise)` calls (real 1920-float32 PCM, the `_encode_pcm` path),
+all on the engine pool.
+
+**Root cause: MLX laziness.** `reset_session()` → `LmGen.reset_streaming()` +
+`step_system_prompts()` (`personaplex_mlx/models/generate.py:312`) builds one
+lazy transformer step per voice-prompt frame and system-prompt token (~500
+steps) and evaluates nothing — `reset_session()` returned after ~1.7-2.3s of
+pure graph BUILDING. The first live `engine.step()` after every start was the
+first forced evaluation (`engine.py`, `int(out_text_token[0].item())`) and
+paid the entire re-prime compute. The stall was ONE ~10.8s frame, not 25
+~490ms frames: the logged `step_ms=~490` was that frame averaged over the
+25-frame status window (10.8s + 24×61ms ≈ 12.3s / 25 ≈ 490ms). It recurred
+per start by construction — `stop()` ends in `reset_session()` — and was
+never kernel compilation (the same graph is rebuilt by every reset). The
+"first warm step 11.3-13.3s" of the warm-up was the same mechanism: it forced
+the prime graph that `VoiceEngine.__init__` had built lazily.
+
+Probe, before the fix (per cycle: reset; then 30 step times):
+
+- cycle 1: reset 2263ms; first step **10844ms**, rest 56-66ms (median 61ms)
+- cycle 2: reset 1712ms; first step **10765ms**, rest 58-66ms (median 62ms)
+- cycle 3: reset 1710ms; first step **10801ms**, rest 58-65ms (median 62ms)
+- discriminator: `mx.eval(LM state)` straight after a fourth reset took
+  **10.68s**, and the first step after it 73ms — the pending graph IS the
+  stall.
+
+**Fix** (`engine._prime`, called from `__init__` and `reset_session()`):
+after `reset_streaming()` + `step_system_prompts()`, force the graph with
+`mx.eval` on exactly the state the next step reads — the token cache,
+provided mask, and every layer's KV cache; their dependency closure is the
+whole re-prime. The cost now lands in `load()` and `stop()` on the engine
+worker, never on a live frame. `mx.eval` is semantically transparent (the
+evaluated state is identical to the lazy one), so the seeded regression
+trajectory is unchanged.
+
+Probe, after the fix: `reset_session()` 12.4-12.8s (pays its own re-prime);
+first step **73 / 77 / 76ms** across the 3 cycles, rest 56-68ms; `mx.eval(LM
+state)` after a reset is 0.00s (nothing left pending). Warm-up first step
+fell 11.3s → 31ms (construction now evaluates its own prime); `load()` total
+~24s → ~35s, absorbing the eval of its final reset.
+
+Live re-verification (same sandbox, `VAD_RMS_THRESHOLD=0.03`, two
+start→stop→start cycles against one process over `/ws`): **zero**
+`catch-up:` lines in the whole log; first status window `fps=11.9
+step_ms=68` and `fps=11.9 step_ms=66`, locked to 12.5 from the second
+window; the greeting begins within the first second of "session live".
+The relocated cost is visible as `stop()` taking ~14s before its ack
+(teardown, serialized by the lifecycle lock — not live audio).
+
+Suites after the fix: fast `218 passed, 29 deselected` (4.9s); slow
+`29 passed, 218 deselected` (139s, exit 138 after the summary — the
+documented artifact). Pinned by
+`tests/test_engine_offline.py::test_reset_session_leaves_engine_hot`
+(red pre-fix: first step 11460ms vs 62ms median; green post-fix: 70ms).
+
 ## Residual risks
 
-- **Per-start cold start (the Check 2 failure).** The first ~25 live frames
-  after EVERY `start()` run ~490ms each, dumping ~10s of silent mic frames in
-  one warning. Bounded and silent-frames-only, but it recurs on every
-  stop/start cycle — the bundle's "no drift dump" claim is not met until
-  warm-up also covers the start()-scoped paths (the post-reset re-prime and
-  real-PCM encode).
+- **Per-start cold start — RESOLVED (Check 2 resolution above).** The stall
+  was the unevaluated system-prompt re-prime graph, now forced inside
+  `load()`/`stop()`. Trade-off accepted: `stop()` blocks ~12-14s while the
+  next conversation's prime is computed and evaluated; a future option is
+  snapshotting the evaluated primed state once and restoring it per reset
+  (the primed state is deterministic — all prompt-replay tokens are forced).
 - **Pre-convergence blip scales with speaker volume.** Quiet/moderate
   speakers: no blip. Loud speakers: 1–2 garbled fragments leak in the first
   seconds of the first utterance and route tier 0. The gate's filler list
