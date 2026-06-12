@@ -89,7 +89,11 @@ async def _ws(request: web.Request) -> web.WebSocketResponse:
     session = request.app[SESSION_KEY]
     ws = web.WebSocketResponse()
     # Subscribe BEFORE the handshake reply: once the client sees the 101, any
-    # event emitted is guaranteed to be queued for it.
+    # event emitted is guaranteed to be queued for it. Replay ordering: the
+    # last() reads below happen AFTER this subscribe, so a session/status
+    # event landing in between is both replayed AND queued — the client can
+    # see it twice (never a gap). Clients must treat session/status events as
+    # idempotent state snapshots, which they are.
     q = bus.subscribe()
     writer: asyncio.Task | None = None
     try:
@@ -109,8 +113,9 @@ async def _ws(request: web.Request) -> web.WebSocketResponse:
                 await writer
             except asyncio.CancelledError:
                 pass
-            except Exception:
-                pass  # a send into a just-closed socket is normal on disconnect
+            except Exception as exc:
+                # a send into a just-closed socket is normal on disconnect
+                log.debug("ws writer closed: %r", exc)
         bus.unsubscribe(q)
     return ws
 
