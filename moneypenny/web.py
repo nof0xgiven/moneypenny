@@ -59,8 +59,10 @@ async def _send_ack(ws: web.WebSocketResponse, ack: dict) -> None:
     aiohttp.server traceback (regression: tests/test_web.py vanishing client)."""
     try:
         await ws.send_json(ack)
-    except ConnectionResetError:
-        log.debug("client gone before ack %s could be delivered", ack)
+    except (RuntimeError, ConnectionResetError) as exc:
+        # ConnectionResetError while the transport is closing; RuntimeError
+        # once aiohttp considers the socket closed.
+        log.debug("client gone before ack %s could be delivered: %r", ack, exc)
 
 
 async def _handle_command(ws: web.WebSocketResponse, session, raw: str) -> None:

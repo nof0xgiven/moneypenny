@@ -205,6 +205,12 @@ class Session:
     def __init__(self, cfg: Config, bus: EventBus) -> None:
         self.cfg = cfg
         self.bus = bus
+        # Serializes start()/stop(): both have await points (task cancel,
+        # engine reset on the pool — seconds in prod) where an unserialized
+        # caller (e.g. two web clients, or a rapid start-during-stop) would
+        # interleave, leaking/closing the wrong AudioIO and emitting session
+        # states out of order.
+        self._lifecycle = asyncio.Lock()
 
         # Pools first: MLX models must be constructed on the worker thread that
         # will run them (streams are thread-bound; see module docstring).
@@ -277,30 +283,41 @@ class Session:
         self.bus.emit("session", state="error", reason=repr(t.exception()))
 
     async def start(self) -> None:
-        """Open audio and spawn the frame loop. Fresh conversation state each call."""
-        if self._loop_task is not None:
-            if not self._loop_task.done():
-                raise RuntimeError("session already started (stop() it first)")
-            # previous loop crashed: clean up its audio/timers before restarting
-            await self.stop()
-        if self.engine is None:
-            raise RuntimeError("session not loaded (call load() first)")
+        """Open audio and spawn the frame loop. Fresh conversation state each
+        call. Serialized against stop() (and other starts) by the lifecycle
+        lock: a start landing while a stop is mid-teardown waits for the full
+        teardown instead of interleaving with it."""
+        async with self._lifecycle:
+            if self._loop_task is not None:
+                if not self._loop_task.done():
+                    raise RuntimeError("session already started (stop() it first)")
+                # previous loop crashed: clean up its audio/timers before restarting
+                await self._stop_locked()
+            if self.engine is None:
+                raise RuntimeError("session not loaded (call load() first)")
 
-        self._vad = EnergyVAD(rms_threshold=self.cfg.vad_rms_threshold)
-        self._gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
-        self._utt = UtteranceState()
+            self._vad = EnergyVAD(rms_threshold=self.cfg.vad_rms_threshold)
+            self._gate = AsrGate()  # hangover = vad's hard boundary by construction; see asr_gate.py
+            self._utt = UtteranceState()
 
-        log.info("audio defaults: device=%s input=%s output=%s",
-                 sd.default.device, _describe_device("input"), _describe_device("output"))
-        self._audio = AudioIO().__enter__()
-        self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
-        # Surface frame-loop crashes even when nobody awaits the task (the web
-        # server path) - never silently swallowed (invariant #2).
-        self._loop_task.add_done_callback(self._on_frame_loop_done)
-        self.bus.emit("session", state="live")
+            log.info("audio defaults: device=%s input=%s output=%s",
+                     sd.default.device, _describe_device("input"), _describe_device("output"))
+            self._audio = AudioIO().__enter__()
+            self._loop_task = asyncio.get_running_loop().create_task(self._frame_loop(self._audio))
+            # Surface frame-loop crashes even when nobody awaits the task (the web
+            # server path) - never silently swallowed (invariant #2).
+            self._loop_task.add_done_callback(self._on_frame_loop_done)
+            self.bus.emit("session", state="live")
 
     async def stop(self) -> None:
-        """Tear down the live conversation. Idempotent."""
+        """Tear down the live conversation. Idempotent, serialized by the
+        lifecycle lock (concurrent stops: the first does the teardown, the
+        rest early-return on the cleared state)."""
+        async with self._lifecycle:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        """Teardown body; caller holds the lifecycle lock."""
         if self._loop_task is None and self._audio is None:
             return
         task, self._loop_task = self._loop_task, None

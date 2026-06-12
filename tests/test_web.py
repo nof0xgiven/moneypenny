@@ -10,10 +10,11 @@ import contextlib
 import logging
 
 import aiohttp
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from moneypenny.events import EventBus
-from moneypenny.web import build_app, serve
+from moneypenny.web import _send_ack, build_app, serve
 
 
 class FakeSession:
@@ -192,6 +193,16 @@ async def test_client_vanishing_mid_command_is_not_a_server_error(caplog):
     server_errors = [r for r in caplog.records
                      if r.name == "aiohttp.server" and r.levelno >= logging.ERROR]
     assert server_errors == []
+
+
+async def test_send_ack_swallows_closed_socket_runtime_error():
+    """aiohttp raises RuntimeError (not ConnectionResetError) once the socket
+    is closed/closing. Racing a real close into exactly that state is not
+    reproducible deterministically in-suite, but an unprepared
+    WebSocketResponse raises the same RuntimeError from the same send path —
+    a real aiohttp object, no mocks."""
+    ws = web.WebSocketResponse()  # no transport: send_json raises RuntimeError
+    await _send_ack(ws, {"type": "ack", "cmd": "stop", "ok": True})  # must not raise
 
 
 async def test_ws_disconnect_unsubscribes_from_bus():
