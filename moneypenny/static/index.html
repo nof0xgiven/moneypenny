@@ -1,1 +1,684 @@
-<!doctype html><title>Moneypenny</title><p>UI lands in Task 3</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moneypenny</title>
+<style>
+/* ============================== styles ==============================
+   Palette matches docs/assets/hero.png: near-black canvas, warm gold
+   for the user/mic channel, teal for the model/briefing channel. */
+:root {
+  --bg:      #0a0a0c;
+  --panel:   #111114;
+  --line:    #1f1f26;
+  --text:    #ece9e2;
+  --muted:   #8a8894;
+  --ghost:   #6a6876;
+  --gold:    #d4a953;
+  --gold-dim:#9c7c3c;
+  --teal:    #3fd0c9;
+  --amber:   #e0973f;
+  --purple:  #a78bdb;
+  --red:     #e06557;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---- header ---- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--line);
+}
+.wordmark {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  color: var(--gold);
+}
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  transition: background .3s, box-shadow .3s;
+}
+.dot.on { background: var(--teal); box-shadow: 0 0 6px var(--teal); }
+
+/* ---- layout ---- */
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 24px;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px;
+}
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+/* ---- center stage: waveform + orb ---- */
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 0 40px;
+  min-height: 420px;
+}
+#wave {
+  width: 100%;
+  height: 200px;
+  display: block;
+  /* fade the oldest (left) samples and the right edge into the panel */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 8%, #000 97%, transparent);
+          mask-image: linear-gradient(to right, transparent, #000 8%, #000 97%, transparent);
+}
+
+.orb {
+  position: relative;
+  margin-top: 36px;
+  width: 140px; height: 140px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: radial-gradient(circle at 38% 32%, #1c1c22, #0d0d10 70%);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: box-shadow .4s, border-color .4s, color .4s, opacity .3s;
+}
+.orb:disabled { cursor: default; opacity: .65; }
+.orb-label { position: relative; z-index: 1; padding: 0 14px; }
+
+/* slow pulsing ring, visible only while live */
+.orb::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  border: 1px solid var(--gold);
+  opacity: 0;
+}
+/* spinner arc, visible only while connecting/loading */
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  border-top-color: var(--ghost);
+  opacity: 0;
+}
+.orb.is-busy::after { opacity: 1; animation: spin 1.1s linear infinite; }
+.orb.is-ready {
+  color: var(--text);
+  border-color: var(--gold-dim);
+}
+.orb.is-ready:hover:not(:disabled) { box-shadow: 0 0 24px rgba(212, 169, 83, .25); }
+.orb.is-live {
+  color: var(--gold);
+  border-color: var(--gold);
+  box-shadow: 0 0 34px rgba(212, 169, 83, .35), inset 0 0 24px rgba(212, 169, 83, .12);
+}
+.orb.is-live::before { animation: pulse 2.6s ease-out infinite; }
+.orb.is-error {
+  color: var(--red);
+  border-color: var(--red);
+  box-shadow: 0 0 24px rgba(224, 101, 87, .25);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse {
+  0%   { transform: scale(1);    opacity: .8; }
+  100% { transform: scale(1.45); opacity: 0; }
+}
+
+/* ---- activity feed ----
+   The list scrolls inside an absolutely-positioned region so the feed's
+   content can never grow the grid row: the panel always matches the
+   stage's height exactly. */
+.feed {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.feed-scroll { flex: 1; min-height: 0; position: relative; }
+@media (max-width: 900px) { .feed-scroll { min-height: 320px; } }
+.feed h2 {
+  margin: 0;
+  padding: 14px 18px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+#feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a33 transparent;
+}
+#feed-list::-webkit-scrollbar { width: 8px; }
+#feed-list::-webkit-scrollbar-thumb { background: #2a2a33; border-radius: 4px; }
+#feed-list::-webkit-scrollbar-track { background: transparent; }
+#feed-list:empty::after {
+  content: "Waiting for activity…";
+  display: block;
+  padding: 18px;
+  color: var(--ghost);
+  font-size: 13px;
+}
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 18px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.row time {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ghost);
+}
+.row .txt { color: var(--text); flex: 1; min-width: 0; }
+
+.row.utterance .txt { color: var(--ghost); font-style: italic; }
+.row.utterance.final .txt { color: var(--text); font-style: normal; }
+
+.badge {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .4px;
+  background: #26262e;
+  color: var(--muted);
+}
+.badge.t1 { background: rgba(212, 169, 83, .16); color: var(--gold); }
+.badge.t2 { background: rgba(224, 151, 63, .16);  color: var(--amber); }
+.badge.t3 { background: rgba(167, 139, 219, .16); color: var(--purple); }
+/* chip + confidence flow inline with the transcript so long transcripts
+   wrap as prose instead of being squeezed into a narrow column */
+.chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.conf { margin-left: 6px; font-size: 11px; color: var(--ghost); white-space: nowrap; }
+
+.row.tool .txt    { color: var(--teal); }
+.row.tool.fail .txt { color: var(--red); }
+.row.tool.esc .txt  { color: var(--muted); }
+.row.briefing { font-size: 12px; }
+.row.briefing .txt { color: var(--teal); opacity: .75; }
+
+.row.session {
+  margin: 6px 0;
+  font-size: 11px;
+  color: var(--ghost);
+}
+.row.session time { display: none; }  /* the time is part of the divider text */
+.row.session .txt { color: var(--ghost); flex: none; white-space: nowrap; }
+.row.session::before, .row.session::after {
+  content: "";
+  flex: 1;
+  align-self: center;
+  border-top: 1px solid var(--line);
+}
+.row.session::before { margin-right: 4px; }
+.row.session::after { margin-left: 4px; }
+
+/* ---- footer status strip ---- */
+footer {
+  border-top: 1px solid var(--line);
+  padding: 8px 28px 14px;
+}
+footer summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ghost);
+  user-select: none;
+}
+.strip {
+  margin-top: 8px;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+}
+.strip .val { color: var(--text); }
+.strip .val.warn { color: var(--amber); }
+.strip .sep { color: #3a3a44; padding: 0 6px; }
+
+/* ---- toast ---- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  transform: translateX(-50%);
+  max-width: 70vw;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: #2a1513;
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .3s;
+}
+.toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">Moneypenny</div>
+  <div class="conn">
+    <span id="conn-dot" class="dot"></span>
+    <span id="session-label">connecting</span>
+  </div>
+</header>
+
+<main>
+  <section class="stage panel">
+    <canvas id="wave"></canvas>
+    <button id="orb" class="orb is-busy" disabled>
+      <span id="orb-label" class="orb-label">Connecting…</span>
+    </button>
+  </section>
+  <aside class="feed panel">
+    <h2>Activity</h2>
+    <div class="feed-scroll">
+      <ol id="feed-list"></ol>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <details>
+    <summary>status</summary>
+    <div id="status-strip" class="strip">no status yet</div>
+  </details>
+</footer>
+
+<div id="toast" class="toast"></div>
+
+<script>
+"use strict";
+/* ============================== dom ============================== */
+const $ = (id) => document.getElementById(id);
+const connDot      = $("conn-dot");
+const sessionLabel = $("session-label");
+const orb          = $("orb");
+const orbLabel     = $("orb-label");
+const feedList     = $("feed-list");
+const statusStrip  = $("status-strip");
+const toastEl      = $("toast");
+
+let toastTimer = 0;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 5000);
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/* ============================== orb / session ============================== */
+// Session state drives the orb; ws connectivity gates it. session events are
+// idempotent snapshots (the server replays the last one on every connect).
+let connected    = false;
+let sessionState = null;   // "loading" | "ready" | "live" | "stopped" | "error"
+let pendingCmd   = null;   // cmd awaiting its ack; orb disabled meanwhile
+
+const ORB = {
+  loading: { label: "Loading…",           cls: "is-busy" },
+  ready:   { label: "Start conversation", cls: "is-ready" },
+  stopped: { label: "Start conversation", cls: "is-ready" },
+  live:    { label: "End conversation",   cls: "is-live" },
+  error:   { label: "Restart",            cls: "is-error" },
+};
+
+function renderOrb() {
+  orb.className = "orb";
+  if (!connected) {
+    orb.classList.add("is-busy");
+    orbLabel.textContent = "Connecting…";
+    orb.disabled = true;
+  } else {
+    const view = ORB[sessionState] || ORB.loading;
+    orb.classList.add(view.cls);
+    orbLabel.textContent = view.label;
+    orb.disabled = pendingCmd !== null || view === ORB.loading;
+  }
+  connDot.classList.toggle("on", connected);
+  sessionLabel.textContent = connected ? (sessionState || "waiting") : "offline";
+}
+
+orb.addEventListener("click", () => {
+  if (pendingCmd || !connected) return;
+  pendingCmd = sessionState === "live" ? "stop" : "start";
+  ws.send(JSON.stringify({ cmd: pendingCmd }));
+  renderOrb();
+});
+
+function onSession(ev) {
+  const prev = sessionState;
+  sessionState = ev.state;
+  renderOrb();
+  if (ev.state !== prev) feedSession(ev);   // dedupe replayed snapshots
+}
+
+function onAck(ev) {
+  if (ev.cmd === pendingCmd) pendingCmd = null;
+  if (!ev.ok) toast(`${ev.cmd || "command"} failed: ${ev.error}`);
+  renderOrb();
+}
+
+/* ============================== ws ============================== */
+// Auto-reconnect with exponential backoff (1s → 10s cap).
+let ws = null;
+let backoffMs = 1000;
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    connected = true;
+    backoffMs = 1000;
+    renderOrb();
+  };
+  ws.onclose = () => {
+    connected = false;
+    pendingCmd = null;
+    renderOrb();
+    setTimeout(connect, backoffMs);
+    backoffMs = Math.min(backoffMs * 2, 10000);
+  };
+  ws.onmessage = (msg) => {
+    let ev;
+    try { ev = JSON.parse(msg.data); } catch { return; }
+    switch (ev.type) {
+      case "session":  onSession(ev); break;
+      case "ack":      onAck(ev); break;
+      case "audio":    wavePush(ev.mic_rms, ev.out_rms); break;
+      case "vad":      onVad(ev); break;
+      case "partial":  onPartial(ev); break;
+      case "route":    feedRoute(ev); break;
+      case "tool":     feedTool(ev); break;
+      case "briefing": feedBriefing(ev); break;
+      case "status":   onStatus(ev); break;
+      default: break;  // forward-compatible: ignore unknown event types
+    }
+  };
+}
+connect();
+
+/* ============================== wave ============================== */
+// A scrolling history of mirrored bars: gold (mic, above center) and teal
+// (model output, below center). Audio events arrive at ~12.5/s; the draw loop
+// pushes one column per 60Hz tick, easing toward the latest sample, so the
+// scroll is smooth regardless of event rate. When no audio flows, the bars
+// decay away and a breathing sine ripple fades in.
+const canvas = $("wave");
+const ctx = canvas.getContext("2d");
+
+const COL_STEP = 4;                  // px per column (3px bar + 1px gap)
+const RMS_FULL = 0.4;                // rms mapped to full bar height
+const IDLE_AFTER_MS = 600;           // no audio for this long -> idle ripple
+
+let cols = [];                       // ring buffer of {m, o} in 0..1
+let micLevel = 0, outLevel = 0;      // eased draw levels
+let micTarget = 0, outTarget = 0;    // latest scaled samples from ws
+let lastAudioAt = -1e9;
+let idleAmt = 1;                     // 0 = live bars, 1 = idle ripple
+let cssW = 0, cssH = 0;
+
+// sqrt scaling so quiet speech (rms ~0.02) is clearly visible
+const scaleRms = (rms) => Math.sqrt(Math.min(Math.max(rms, 0), RMS_FULL) / RMS_FULL);
+
+function wavePush(micRms, outRms) {
+  micTarget = scaleRms(micRms);
+  outTarget = scaleRms(outRms);
+  lastAudioAt = performance.now();
+}
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  cssW = canvas.clientWidth;
+  cssH = canvas.clientHeight;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const n = Math.ceil(cssW / COL_STEP) + 1;
+  while (cols.length > n) cols.shift();
+}
+new ResizeObserver(resizeCanvas).observe(canvas);
+resizeCanvas();
+
+function pushCol() {
+  // fast attack, slow release: peaks land crisply, tails decay naturally
+  micLevel += (micTarget - micLevel) * (micTarget > micLevel ? 0.55 : 0.18);
+  outLevel += (outTarget - outLevel) * (outTarget > outLevel ? 0.55 : 0.18);
+  cols.push({ m: micLevel, o: outLevel });
+  const n = Math.ceil(cssW / COL_STEP) + 1;
+  while (cols.length > n) cols.shift();
+}
+
+function drawRipple(now) {
+  // two phase-shifted breathing sines: gold (user channel), teal echo
+  const midY = cssH / 2;
+  const breathe = 8 + 5 * Math.sin(now * 0.0011);
+  for (const [color, phase, amp] of [
+    ["rgba(212,169,83,", 0, 1],
+    ["rgba(63,208,201,", 2.1, 0.6],
+  ]) {
+    ctx.beginPath();
+    for (let x = 0; x <= cssW; x += 3) {
+      const y = midY + Math.sin(x * 0.018 + now * 0.0019 + phase) * breathe * amp * idleAmt;
+      x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = color + 0.5 * idleAmt * amp + ")";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+let colAcc = 0, lastFrame = performance.now();
+function frame(now) {
+  // time-based column pushes: 60 columns/s on any display refresh rate
+  colAcc += now - lastFrame;
+  lastFrame = now;
+  const idle = now - lastAudioAt > IDLE_AFTER_MS;
+  if (idle) { micTarget = 0; outTarget = 0; }
+  for (colAcc = Math.min(colAcc, 250); colAcc >= 1000 / 60; colAcc -= 1000 / 60) pushCol();
+  idleAmt += ((idle ? 1 : 0) - idleAmt) * 0.05;
+
+  ctx.clearRect(0, 0, cssW, cssH);
+  const midY = cssH / 2;
+  const halfH = cssH / 2 - 8;
+
+  // center hairline
+  ctx.fillStyle = "rgba(236,233,226,0.07)";
+  ctx.fillRect(0, midY - 0.5, cssW, 1);
+
+  // bars, newest at the right edge
+  const liveAlpha = 1 - idleAmt;
+  if (liveAlpha > 0.02) {
+    const x0 = cssW - cols.length * COL_STEP;
+    ctx.fillStyle = `rgba(212,169,83,${0.92 * liveAlpha})`;
+    for (let i = 0; i < cols.length; i++) {
+      const h = Math.max(cols[i].m * halfH, 1);
+      ctx.fillRect(x0 + i * COL_STEP, midY - h, COL_STEP - 1, h);
+    }
+    ctx.fillStyle = `rgba(63,208,201,${0.85 * liveAlpha})`;
+    for (let i = 0; i < cols.length; i++) {
+      const h = Math.max(cols[i].o * halfH, 1);
+      ctx.fillRect(x0 + i * COL_STEP, midY, COL_STEP - 1, h);
+    }
+  }
+
+  if (idleAmt > 0.02) drawRipple(now);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ============================== feed ============================== */
+const FEED_MAX = 100;
+
+function addRow(cls, ts, children) {
+  const li = document.createElement("li");
+  li.className = `row ${cls}`;
+  const t = document.createElement("time");
+  t.textContent = fmtTime(ts);
+  li.append(t, ...children);
+  feedList.prepend(li);
+  while (feedList.children.length > FEED_MAX) feedList.lastChild.remove();
+  return li;
+}
+
+function span(cls, text) {
+  const s = document.createElement("span");
+  s.className = cls;
+  s.textContent = text;
+  return s;
+}
+
+// -- utterances: one ghost row streams partials, solidifies on utterance_end
+let uttRow = null;
+
+function ensureUttRow(ts, text) {
+  if (!uttRow) uttRow = addRow("utterance", ts, [span("txt", "")]);
+  if (text) uttRow.querySelector(".txt").textContent = text;
+}
+
+function onPartial(ev) {
+  ensureUttRow(ev.ts, ev.text);
+}
+
+function onVad(ev) {
+  if (ev.event === "speech_start") {
+    ensureUttRow(ev.ts, ev.partial || "…");
+  } else if (ev.event === "utterance_end") {
+    if (uttRow) {
+      const text = ev.partial || uttRow.querySelector(".txt").textContent;
+      uttRow.querySelector(".txt").textContent = text;
+      uttRow.classList.add("final");
+      uttRow = null;
+    }
+  }
+  // maybe_end: keep streaming; nothing to show
+}
+
+// -- routes: tier badge + transcript + tool chip + confidence
+const TIERS = { 0: "chat", 1: "reflex", 2: "escalate", 3: "background" };
+const TOOL_GLYPHS = { weather: "☀", homey: "⌂", timer: "◷" };
+
+function feedRoute(ev) {
+  const txt = span("txt", ev.transcript);
+  if (ev.tool) {
+    const glyph = TOOL_GLYPHS[ev.tool];
+    txt.append(span("chip", glyph ? `${glyph} ${ev.tool}` : ev.tool));
+  }
+  txt.append(span("conf", `${Math.round(ev.confidence * 100)}%`));
+  addRow("route", ev.ts, [span(`badge t${ev.tier}`, TIERS[ev.tier] ?? `T${ev.tier}`), txt]);
+}
+
+// -- tool results: briefing text / escalation / failure
+function feedTool(ev) {
+  if (ev.escalated !== undefined) {
+    addRow("tool esc", ev.ts, [span("txt", `escalated to T${ev.escalated}`)]);
+  } else if (ev.ok) {
+    addRow("tool", ev.ts, [span("txt", `BRIEFING: ${ev.briefing}`)]);
+  } else {
+    addRow("tool fail", ev.ts, [span("txt", `tool failed — ${ev.transcript}`)]);
+  }
+}
+
+function feedBriefing(ev) {
+  const text = ev.stage === "synthesized"
+    ? `briefing synthesized ${Math.round(ev.ms)}ms · ${ev.audio_s.toFixed(1)}s audio`
+    : "briefing injected";
+  addRow("briefing", ev.ts, [span("txt", text)]);
+}
+
+// -- session state changes as subtle dividers
+const SESSION_TEXT = {
+  loading: "loading models",
+  ready:   "assistant ready",
+  live:    "conversation started",
+  stopped: "conversation ended",
+  error:   "session error",
+};
+
+function feedSession(ev) {
+  let text = SESSION_TEXT[ev.state] ?? ev.state;
+  if (ev.reason) text += ` — ${ev.reason}`;
+  addRow("session", ev.ts, [span("txt", `${text} ${fmtTime(ev.ts)}`)]);
+}
+
+/* ============================== status strip ============================== */
+function onStatus(ev) {
+  statusStrip.replaceChildren();
+  const FPS_WARN_BELOW = 11;
+  const parts = [
+    ["fps", ev.fps.toFixed(1), ev.fps < FPS_WARN_BELOW],
+    ["step", `${Math.round(ev.step_ms)}ms`],
+    ["asr", `${Math.round(ev.asr_ms)}ms`],
+    ["micq", ev.micq],
+    ["spkq", ev.spkq],
+    ["underruns", ev.underruns],
+    ["micRMS", ev.mic_rms_max.toFixed(3)],
+  ];
+  parts.forEach(([name, value, warn], i) => {
+    if (i > 0) statusStrip.append(span("sep", "·"));
+    statusStrip.append(`${name} `, span(warn ? "val warn" : "val", String(value)));
+  });
+}
+</script>
+</body>
+</html>
