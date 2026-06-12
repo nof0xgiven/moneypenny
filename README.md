@@ -15,7 +15,7 @@ The spec lives in `docs/moneypenny-spec.md`. Architecture decisions, with the sp
 - Apple Silicon Mac (MLX). Measured real time on an M3 Ultra: 12.5 fps, 64 ms per engine step.
 - Python 3.12
 - A local checkout of `personaplex-mlx`; weights for `nvidia/personaplex-7b-v1` download to your Hugging Face cache on first run
-- For open speakers: `brew install speexdsp`. Built-in echo cancellation cancels the model's voice out of the mic (measured 19-26 dB on this hardware, residual below room ambient once converged). Headphones still give the cleanest capture and need none of this; without the dylib the app starts normally and just runs without AEC.
+- For open speakers: `brew install speexdsp`. Built-in echo cancellation cancels the model's voice out of the mic (measured 20-30 dB on this hardware, residual below room ambient once converged). Headphones still give the cleanest capture and need none of this; without the dylib the app starts normally and just runs without AEC.
 
 ## Setup
 
@@ -54,7 +54,7 @@ The slow tests run real inference. There are no mocked models anywhere in the su
 
 Copy `.env.example` to `.env`. `HOMEY_BASE_URL` and `HOMEY_API_KEY` are optional; without them the app starts with home control disabled and says so when asked to touch the lights. Set `VAD_RMS_THRESHOLD` above your room's noise floor (the status log prints `micRMS` so you can read it off).
 
-Speakers work: every frame the app plays is also the far-end reference for a speex echo canceller on the mic path, so the model stops hearing its own voice. Measured on this hardware: 19-26 dB of echo suppression, residual below room ambient within 2-3 seconds of the model speaking. The first second of the very first utterance can still blip the VAD before the filter converges; the classification gate absorbs that. Loud rooms with hot mics may still leak fragments during long model turns, so headphones remain the gold standard. `ECHO_CANCEL=0` turns the canceller off.
+Speakers work: every frame the app plays is also the far-end reference for a speex echo canceller on the mic path, so the model stops hearing its own voice. Measured on this hardware: 20-30 dB of echo suppression, residual below room ambient within 2-3 seconds of the model speaking; in the live A/B the greeting produced phantom self-routes with the canceller off and zero VAD events with it on. The pairing is anchored by hardware timestamps, so if a stream loses samples under load the canceller re-converges in a couple of seconds instead of dying silently (the `aecslips` status counter ticks when that happens). The first second of the very first utterance can still blip the VAD before the filter converges; the classification gate absorbs that. Loud rooms with hot mics may still leak fragments during long model turns, so headphones remain the gold standard. `ECHO_CANCEL=0` turns the canceller off.
 
 ```bash
 .venv/bin/moneypenny
@@ -63,7 +63,7 @@ Speakers work: every frame the app plays is also the far-end reference for a spe
 The log prints a status line every two seconds:
 
 ```
-status: micq=0 spkq=13 underruns=154 micRMS=0.015 vad=False asr_on=False fps=12.5 asr_ms=0 step_ms=63
+status: micq=0 spkq=13 underruns=154 aecslips=0 micRMS=0.015 vad=False asr_on=False fps=12.5 asr_ms=0 step_ms=63
 ```
 
 Healthy idle: `fps=12.5`, `asr_on=False`, `micq=0`, `underruns` flat after warm-up. ASR runs on its own worker while you speak, briefing TTS runs on another, and the engine never waits for either.

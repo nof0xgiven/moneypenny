@@ -651,17 +651,18 @@ class Session:
                 elapsed = time.perf_counter() - win_start
                 fps = win_frames / elapsed if elapsed > 0 else 0.0
                 log.info(
-                    "status: micq=%d spkq=%d underruns=%d micRMS=%.6f vad=%s asr_on=%s "
-                    "asr_len=%d fps=%.1f asr_ms=%.0f step_ms=%.0f",
+                    "status: micq=%d spkq=%d underruns=%d aecslips=%d micRMS=%.6f "
+                    "vad=%s asr_on=%s asr_len=%d fps=%.1f asr_ms=%.0f step_ms=%.0f",
                     audio.mic_frames.qsize(), audio.speaker_frames.qsize(),
-                    audio.underruns,
+                    audio.underruns, audio.ref_slips,
                     win_max_rms, vad.in_speech, gate.active, len(partial),
                     fps,
                     win_asr_s / win_frames * 1000, win_step_s / win_frames * 1000,
                 )
                 bus.emit("status",
                          micq=audio.mic_frames.qsize(), spkq=audio.speaker_frames.qsize(),
-                         underruns=audio.underruns, mic_rms_max=win_max_rms,
+                         underruns=audio.underruns, ref_slips=audio.ref_slips,
+                         mic_rms_max=win_max_rms,
                          vad=vad.in_speech, asr_on=gate.active, fps=fps,
                          asr_ms=win_asr_s / win_frames * 1000,
                          step_ms=win_step_s / win_frames * 1000)

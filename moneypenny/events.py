@@ -27,8 +27,8 @@ Event types emitted by the Session (data keys beyond type/ts):
              {"ok": False, "escalated": int, "transcript": str}
   briefing {"stage": "synthesized", "ms": float, "audio_s": float}
            then {"stage": "injected"}
-  status   {"micq", "spkq", "underruns", "mic_rms_max", "vad",
-            "asr_on", "fps", "asr_ms", "step_ms"}          every ~2s
+  status   {"micq", "spkq", "underruns", "ref_slips", "mic_rms_max",
+            "vad", "asr_on", "fps", "asr_ms", "step_ms"}   every ~2s
 
 Threading: emit() is safe from ANY thread — events are always marshalled to
 the owning asyncio loop via call_soon_threadsafe, so subscriber queues and

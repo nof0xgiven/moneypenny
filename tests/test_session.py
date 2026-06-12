@@ -92,6 +92,7 @@ class _FakeAudio:
         self.mic_frames = queue.Queue()
         self.speaker_frames = queue.Queue()
         self.underruns = 0
+        self.ref_slips = 0
         self.closes = 0
         self.aec = aec
 

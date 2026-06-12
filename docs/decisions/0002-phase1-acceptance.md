@@ -383,10 +383,14 @@ the live session):
    `test_audioio_reanchors_after_mic_side_sample_loss`). Measured:
    synthetic ERLE 33.9dB converged (19.6dB linear filter alone), double-talk
    near-speech correlation 0.973, 0.44ms per 80ms frame on the input
-   callback thread; acoustically 19–26dB suppression with the residual
-   below this room's ambient floor, and the live app's greeting no longer
-   produces phantom routes (AEC-off control run reproduced the
-   owner's failure: phantom partials of the model's own words, routed).
+   callback thread; acoustically 20–30dB suppression (echo-component RMS
+   0.0028 → 0.0001 in the speaker A/B harness) with the residual at this
+   room's ambient floor. Live A/B on the loud internal speakers, VAD
+   threshold 0.03: with AEC off the greeting reproduced the owner's failure
+   (phantom partials of the model's own words — "What?", "Today.", "How are
+   you feeling?" — routed, the model answering its own echo for half a
+   minute); with AEC on, zero VAD events through the greeting and a clean
+   idle after (`aecslips` in the status line counts re-anchor events live).
    Honest residuals: the first 1–2s of the model's first utterance can blip
    VAD before the filter converges (empty/backchannel partials, absorbed by
    the classification gate), and loud rooms can still leak fragments during
