@@ -63,8 +63,9 @@ Homey/timer commands need the full command present in the partial to classify
 Tier 1 at all, and escalation bias pushes truncated partials to Tier 2.
 
 Known Phase 1 limitation - speaker-queue latency ratchet: any engine-worker
-stall (formerly each inject() TTS, and the cold first steps after model load -
-now paid in load()'s warm-up before any frames flow) blocks stepping, then
+stall (formerly each inject() TTS, and the lazy system-prompt prime graph the
+first live frame after a reset was forced to evaluate - now paid by
+engine._prime inside load()/stop() before any frames flow) blocks stepping, then
 the frame loop catches up by stepping through the backlog faster than
 realtime, bursting the produced PCM into the unbounded speaker_frames queue.
 After catch-up, production and consumption both run at 12.5 fps again, so the
@@ -296,10 +297,14 @@ class Session:
         # Engine FIRST: its worker must win the first-mlx-import race (import
         # affinity, module docstring) before the other pools touch mlx.
         self.engine = await loop.run_in_executor(self.engine_pool, _load_engine, self.cfg)
-        # Warm up immediately, while no other pool touches MLX: cold-start
-        # kernel compilation lands here instead of dragging the first live
-        # seconds to fps 1.5 (see _warm_up_engine). Loading state on the bus
-        # already covers this phase.
+        # Warm up immediately, while no other pool touches MLX. Two distinct
+        # cold costs, both paid inside load()/stop() rather than by live
+        # frames: one-time Metal kernel compilation (mostly during
+        # construction's prime eval, the residue at the first warm step
+        # here), and the per-reset lazy system-prompt prime graph, which
+        # engine._prime forces inside construction and every reset_session
+        # (see _warm_up_engine and decision 0003 check 2). Loading state on
+        # the bus already covers this phase.
         log.info("engine warm-up: %d throwaway steps...", ENGINE_WARMUP_STEPS)
         first_s, last_s = await loop.run_in_executor(
             self.engine_pool, _warm_up_engine, self.engine
