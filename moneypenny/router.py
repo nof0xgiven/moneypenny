@@ -46,17 +46,17 @@ tier 3: long-running tasks the user wants done in the background ("research X an
 If in ANY doubt, use tier 2. Never use tier 1 unless the utterance is unambiguous."""
 
 # Prompt edits here are EMPIRICAL: rerun tests/test_router.py -m "" (greedy
-# decode = deterministic). Interactions are non-linear on this 0.6B model -
-# backchannels ("yeah" -> tier 3 live misroute 2026-06-12) are fixed by the
-# tier 0 sysline above, NOT a fewshot pair: a ("yeah", tier 0) example
-# alongside the garbled-weather pair below flipped "tell me a story about a
-# lighthouse" to tier 1 timer regardless of placement. Every pair also costs
-# prompt tokens on every classification (latency budget: p95 < 300ms).
+# decode = deterministic). Interactions are non-linear on this 0.6B model:
+# backchannel acknowledgements belong in the tier 0 system line above, NOT in
+# a fewshot pair - a ("yeah", tier 0) example alongside the garbled-weather
+# pair below flips "tell me a story about a lighthouse" to tier 1 timer
+# regardless of placement. Every pair also costs prompt tokens on every
+# classification (latency budget: p95 < 300ms).
 _FEWSHOT = [
     ("what's the weather today",
      '{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.97}'),
-    # ASR-garbled weather ask (live misroute 2026-06-12: went tier 0, tool
-    # never fired): disfluencies must not mask a recognizable weather question.
+    # ASR-garbled weather ask: disfluencies must not mask a recognizable
+    # weather question (without this pair it classifies as tier 0 chat).
     ("uh I just wondered what the weather is",
      '{"tier": 1, "tool": "weather", "args": {}, "confidence": 0.9}'),
     ("turn off the kitchen lights",
